@@ -8,3 +8,4 @@ backup/
 tests/prom_tests
 examples/metrics_demo
 *.a
+tests/heap_check

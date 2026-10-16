@@ -18,4 +18,6 @@ returned by `Labels()` stays pinned until `Destroy`.
 - Refcounting as the default: burdens every caller of `Labels()`.
 
 ## Consequences
-Heavy churn through `Labels()` leaks bounded memory (`RetiredCount`).
+Heavy churn through `Labels()` leaks bounded memory (`RetiredCount`). Verified with
+`tests/heap_check.lpr` under heaptrc (use-after-free, double free, leaks) on Windows x64
+and Linux x86_64, plus a negative control (`uaf`) proving the check bites.
