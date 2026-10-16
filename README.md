@@ -15,7 +15,27 @@ Runtime-only package, FCL only (no LCL), so it works in console apps and service
 - `src/prom_collectors` - process and FPC heap metrics, labelled callback metrics, computed on scrape
 - `src/prom_server` - optional `/metrics` HTTP server (fphttpserver), negotiates text 0.0.4 or OpenMetrics
 - `tests/` - FPCUnit console tests (`lazbuild tests/prom_tests.lpi`)
-- `examples/metrics_demo.lpr`
+- `examples/metrics_demo.lpr` - counter, gauge, histogram, quantile summary, StateSet, exemplars, both output formats
+
+## Quick start
+```pascal
+uses prom_metrics, prom_registry, prom_exposition, prom_http;
+
+var Req: TPromCounter; Dur: TPromSummary; Phase: TPromStateSet;
+begin
+  Req := DefaultRegistry.Counter('app_requests_total', 'Requests', ['code']);
+  Dur := DefaultRegistry.Summary('app_duration_seconds', 'Duration', [], [0.5, 0.9, 0.99]);
+  Phase := DefaultRegistry.StateSet('app_phase', 'Phase', [], ['starting', 'running']);
+
+  Phase.SetOnly('running');                                            // atomic
+  Req.Labels(['500']).IncWithExemplar(1, ['trace_id', 'abc123']);      // OpenMetrics only
+  Dur.Observe(0.25);                                                   // lock-free
+
+  Write(MetricsBody);                                  // text 0.0.4
+  Write(DefaultRegistry.Collect(pfOpenMetrics));       // OpenMetrics 1.0
+end.
+```
+Cache `Labels(...)` results in hot paths. Quantiles are windowed (10 min) estimates with 1% relative error.
 
 ## Roadmap
 1. ~~Labelled children~~ (done: `Labels(...)`, RW-locked lookup, cached children, `Remove`/`Clear`, `MaxChildren` cap)
