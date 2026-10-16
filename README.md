@@ -45,7 +45,7 @@ Cache `Labels(...)` results in hot paths. Quantiles are windowed (10 min) estima
 5. ~~OpenMetrics 1.0 text output~~ (done, complete: `_created`, exemplars, `# UNIT`, StateSet, GaugeHistogram, name-clash check)
 6. ~~Summary quantiles~~ (done: windowed relative-error sketch, lock-free `Observe`)
 7. ~~Striped counters~~ (done, opt-in: `Counter(name, help, labels, Stripes)`; about 50x faster with 8 contending threads)
-8. 32-bit/ARM testing
+8. ~~32-bit/ARM testing~~ (out of scope: the package targets 64-bit CPUs only; tested on Windows x64 and Linux x86_64)
 
 ## Provenance
 Designed and directed by Sergei Pechenko: the requirements, design decisions (recorded as
