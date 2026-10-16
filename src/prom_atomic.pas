@@ -13,6 +13,12 @@ function AtomicAddInt64(var V: Int64; N: Int64): Int64;
 { Atomic read of an Int64 (not torn on 32-bit targets). }
 function AtomicLoadInt64(var V: Int64): Int64;
 
+{ Atomic store of an Int64 (not torn on 32-bit targets). }
+procedure AtomicStoreInt64(var V: Int64; N: Int64);
+
+{ Publishes New into P if P still holds Expected; returns the value P held before. }
+function AtomicCasPointer(var P: Pointer; New, Expected: Pointer): Pointer;
+
 { Double held in an Int64 bit pattern; Bits must start at 0 (= 0.0). }
 procedure AtomicAddDouble(var Bits: Int64; Delta: Double);
 procedure AtomicStoreDouble(var Bits: Int64; Value: Double);
@@ -46,6 +52,20 @@ end;
 function AtomicLoadInt64(var V: Int64): Int64;
 begin
   Result := InterlockedCompareExchange64(V, 0, 0);
+end;
+
+procedure AtomicStoreInt64(var V: Int64; N: Int64);
+var
+  Old: Int64;
+begin
+  repeat
+    Old := AtomicLoadInt64(V);
+  until InterlockedCompareExchange64(V, N, Old) = Old;
+end;
+
+function AtomicCasPointer(var P: Pointer; New, Expected: Pointer): Pointer;
+begin
+  Result := InterlockedCompareExchange(P, New, Expected);
 end;
 
 function AtomicAddInt64(var V: Int64; N: Int64): Int64;

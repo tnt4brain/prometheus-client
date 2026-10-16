@@ -18,7 +18,7 @@ unit prom_metrics;
 interface
 
 uses
-  SysUtils, Classes, SyncObjs, DateUtils, prom_atomic, prom_exposition, prom_clock;
+  SysUtils, Classes, SyncObjs, DateUtils, Math, prom_sketch, prom_atomic, prom_exposition, prom_clock;
 
 const
   { Label value used on the shared child that absorbs combinations over MaxChildren. }
@@ -233,26 +233,42 @@ type
     function StartTimer: TPromTimer;
   end;
 
-  { Summary without quantiles: exposes only _sum and _count, which is a valid summary
-    and enough for rates and averages (rate(x_sum) / rate(x_count)). Cheaper than a
-    histogram when the distribution does not matter. The "quantile" label is reserved. }
+  { Summary. Without quantiles it exposes only _sum and _count, which is a valid summary
+    and enough for rates and averages (rate(x_sum) / rate(x_count)), and is cheaper than a
+    histogram when the distribution does not matter. With quantiles each child also keeps a
+    windowed log-bucket sketch (see prom_sketch: relative error, lock-free Observe) and
+    exposes name{quantile="0.99"} lines before _sum and _count; _sum and _count stay
+    cumulative while the quantiles cover the last MaxAge seconds. The "quantile" label is
+    reserved. }
+
+  TPromSummary = class;
 
   TPromSummaryChild = class(TPromObserverChild)
   private
     FCount: Int64;
     FSumBits: Int64;
+    FOwner: TPromSummary;
+    FSketch: TPromSketch;   // nil for a summary without quantiles
   protected
     procedure CollectSamples(W: TPromTextWriter; const MetricName: string); override;
   public
+    constructor Create(AOwner: TPromSummary);
+    destructor Destroy; override;
     procedure Observe(V: Double); override;
   end;
 
   TPromSummary = class(TPromFamily)
+  private
+    FQuantiles: TPromDoubleArray;
+    FSketchOptions: TPromSketchOptions;
   protected
     function CreateChild: TPromChild; override;
     function MetricType: string; override;
   public
-    constructor Create(const AName, AHelp: string; const ALabelNames: array of string);
+    constructor Create(const AName, AHelp: string; const ALabelNames: array of string); overload;
+    { Quantiles: strictly ascending values in 0..1, e.g. [0.5, 0.9, 0.99]. }
+    constructor Create(const AName, AHelp: string; const ALabelNames: array of string;
+      const AQuantiles: array of Double; const AOptions: TPromSketchOptions); overload;
     function Labels(const Values: array of string): TPromSummaryChild;
     procedure Observe(V: Double);
     function StartTimer: TPromTimer;
@@ -844,32 +860,79 @@ end;
 
 { Summary }
 
+constructor TPromSummaryChild.Create(AOwner: TPromSummary);
+begin
+  inherited Create;
+  FOwner := AOwner;
+  if Length(AOwner.FQuantiles) > 0 then
+    FSketch := TPromSketch.Create(AOwner.FSketchOptions);
+end;
+
+destructor TPromSummaryChild.Destroy;
+begin
+  FSketch.Free;
+  inherited Destroy;
+end;
+
 procedure TPromSummaryChild.Observe(V: Double);
 begin
   AtomicAddInt64(FCount, 1);
   AtomicAddDouble(FSumBits, V);
+  if FSketch <> nil then
+    FSketch.Observe(V);
 end;
 
 procedure TPromSummaryChild.CollectSamples(W: TPromTextWriter; const MetricName: string);
+var
+  Est: TPromDoubleArray;
+  I: Integer;
+  Sep: string;
 begin
+  if FSketch <> nil then
+  begin
+    Est := FSketch.Quantiles(FOwner.FQuantiles);
+    if FPairs = '' then Sep := '' else Sep := FPairs + ',';
+    for I := 0 to High(Est) do
+      W.WriteSample(MetricName, Sep + 'quantile="' + W.FormatLe(FOwner.FQuantiles[I]) + '"', Est[I]);
+  end;
   W.WriteSample(MetricName + '_sum', FPairs, AtomicLoadDouble(FSumBits));
   W.WriteSample(MetricName + '_count', FPairs, AtomicLoadInt64(FCount));
   WriteCreated(W, MetricName);
 end;
 
 constructor TPromSummary.Create(const AName, AHelp: string; const ALabelNames: array of string);
+begin
+  Create(AName, AHelp, ALabelNames, [], PromDefaultSketchOptions);
+end;
+
+constructor TPromSummary.Create(const AName, AHelp: string; const ALabelNames: array of string;
+  const AQuantiles: array of Double; const AOptions: TPromSketchOptions);
 var
   I: Integer;
 begin
   for I := 0 to High(ALabelNames) do
     if ALabelNames[I] = 'quantile' then
       raise EArgumentException.Create('Label name "quantile" is reserved for summaries');
+  // quantiles and options must be ready before inherited Create builds the label-less child
+  SetLength(FQuantiles, Length(AQuantiles));
+  for I := 0 to High(AQuantiles) do
+  begin
+    // IsNan first: comparing a NaN raises EInvalidOp instead of returning False
+    if IsNan(AQuantiles[I]) or not ((AQuantiles[I] >= 0) and (AQuantiles[I] <= 1)) then
+      raise EArgumentException.Create('Summary quantiles must be between 0 and 1');
+    if (I > 0) and (AQuantiles[I] <= AQuantiles[I - 1]) then
+      raise EArgumentException.Create('Summary quantiles must be strictly ascending');
+    FQuantiles[I] := AQuantiles[I];
+  end;
+  FSketchOptions := AOptions;
+  if Length(FQuantiles) > 0 then
+    PromCheckSketchOptions(AOptions);
   inherited Create(AName, AHelp, ALabelNames);
 end;
 
 function TPromSummary.CreateChild: TPromChild;
 begin
-  Result := TPromSummaryChild.Create;
+  Result := TPromSummaryChild.Create(Self);
 end;
 
 function TPromSummary.MetricType: string;

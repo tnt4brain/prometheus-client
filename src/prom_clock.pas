@@ -7,11 +7,15 @@ unit prom_clock;
 
 interface
 
-{ Seconds since an arbitrary fixed point; only differences are meaningful. }
-function PromMonotonicSeconds: Double;
-
 type
   TPromEpochClock = function: Double;
+
+var
+  { Replaces the monotonic clock (tests: summary windows, timers); nil = system clock. }
+  PromMonotonicClock: TPromEpochClock = nil;
+
+{ Seconds since an arbitrary fixed point; only differences are meaningful. }
+function PromMonotonicSeconds: Double;
 
 var
   { Source of "created" timestamps and Gauge.SetToCurrentTime. Replace it to make
@@ -36,11 +40,21 @@ begin
     Result := (LocalTimeToUniversal(Now) - UnixDateDelta) * SecsPerDay;
 end;
 
+function SystemMonotonicSeconds: Double; forward;
+
+function PromMonotonicSeconds: Double;
+begin
+  if Assigned(PromMonotonicClock) then
+    Result := PromMonotonicClock()
+  else
+    Result := SystemMonotonicSeconds;
+end;
+
 {$IFDEF MSWINDOWS}
 var
   Frequency: Int64;
 
-function PromMonotonicSeconds: Double;
+function SystemMonotonicSeconds: Double;
 var
   Counter: Int64;
 begin
@@ -54,7 +68,7 @@ initialization
   if not QueryPerformanceFrequency(Frequency) then
     Frequency := 0;
 {$ELSE}
-function PromMonotonicSeconds: Double;
+function SystemMonotonicSeconds: Double;
 {$IFDEF LINUX}
 var
   TS: timespec;

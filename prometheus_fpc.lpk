@@ -48,6 +48,10 @@
         <Filename Value="src/prom_server.pas"/>
         <UnitName Value="prom_server"/>
       </Item>
+      <Item>
+        <Filename Value="src/prom_sketch.pas"/>
+        <UnitName Value="prom_sketch"/>
+      </Item>
     </Files>
     <RequiredPkgs>
       <Item>

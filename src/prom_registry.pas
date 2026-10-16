@@ -8,7 +8,7 @@ unit prom_registry;
 interface
 
 uses
-  SysUtils, Classes, SyncObjs, prom_metrics, prom_exposition;
+  SysUtils, Classes, SyncObjs, prom_metrics, prom_exposition, prom_sketch;
 
 type
   TPromRegistry = class
@@ -29,6 +29,12 @@ type
       const Buckets: array of Double): TPromHistogram; overload;
     function Summary(const Name, Help: string): TPromSummary; overload;
     function Summary(const Name, Help: string; const LabelNames: array of string): TPromSummary; overload;
+    { With quantiles (strictly ascending, 0..1; pass [] for LabelNames if there are none):
+      windowed relative-error estimates, defaults from PromDefaultSketchOptions. }
+    function Summary(const Name, Help: string; const LabelNames: array of string;
+      const Quantiles: array of Double): TPromSummary; overload;
+    function Summary(const Name, Help: string; const LabelNames: array of string;
+      const Quantiles: array of Double; const Options: TPromSketchOptions): TPromSummary; overload;
     function Untyped(const Name, Help: string): TPromUntyped; overload;
     function Untyped(const Name, Help: string; const LabelNames: array of string): TPromUntyped; overload;
     function Info(const Name, Help: string; const LabelNames: array of string): TPromInfo;
@@ -127,6 +133,18 @@ function TPromRegistry.Summary(const Name, Help: string;
   const LabelNames: array of string): TPromSummary;
 begin
   Result := Register(TPromSummary.Create(Name, Help, LabelNames)) as TPromSummary;
+end;
+
+function TPromRegistry.Summary(const Name, Help: string; const LabelNames: array of string;
+  const Quantiles: array of Double): TPromSummary;
+begin
+  Result := Summary(Name, Help, LabelNames, Quantiles, PromDefaultSketchOptions);
+end;
+
+function TPromRegistry.Summary(const Name, Help: string; const LabelNames: array of string;
+  const Quantiles: array of Double; const Options: TPromSketchOptions): TPromSummary;
+begin
+  Result := Register(TPromSummary.Create(Name, Help, LabelNames, Quantiles, Options)) as TPromSummary;
 end;
 
 function TPromRegistry.Untyped(const Name, Help: string): TPromUntyped;

@@ -7,7 +7,7 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testregistry, prom_atomic, prom_metrics, prom_registry,
-  prom_exposition, prom_collectors, prom_clock, prom_server, prom_http, fphttpclient, Math, DateUtils;
+  prom_exposition, prom_collectors, prom_clock, prom_sketch, prom_server, prom_http, fphttpclient, Math, DateUtils;
 
 type
   TTestAtomic = class(TTestCase)
@@ -78,6 +78,18 @@ type
     procedure TestCounterExemplar;
     procedure TestHistogramExemplarBuckets;
     procedure TestConcurrentRecordAndScrape;
+  end;
+
+  TTestQuantiles = class(TTestCase)
+  published
+    procedure TestSketchAccuracy;
+    procedure TestSketchWindow;
+    procedure TestSketchClampAndNan;
+    procedure TestSketchOptionsValidation;
+    procedure TestSketchConcurrent;
+    procedure TestSummaryOutput;
+    procedure TestSummaryValidation;
+    procedure TestSummaryWindow;
   end;
 
   TTestServer = class(TTestCase)
@@ -1265,6 +1277,7 @@ var
   H: TPromHistogram;
   S: TPromSummary;
   A, B: Double;
+  I: Integer;
 begin
   begin
     C := R.Counter('http_requests_total',
@@ -1338,6 +1351,12 @@ begin
     H.ObserveWithExemplar(0.05, ['trace_id', 'fast']);
     H.ObserveWithExemplar(2, ['trace_id', 'slow', 'user', 'caf' + #$C3#$A9]);
     H.ObserveWithExemplar(0.07, ['trace_id', 'faster']);   // replaces "fast" in the first bucket
+
+    // summary with quantiles (window clock is pinned by GoldenText); also appended last
+    S := R.Summary('quantile_seconds', 'Summary with quantiles.', ['svc'], [0.5, 0.9, 0.99, 1]);
+    for I := 1 to 100 do
+      S.Labels(['a']).Observe(I * 0.001);
+    S.Labels(['idle']);   // no observations: NaN quantiles
   end;
 end;
 
@@ -1351,12 +1370,18 @@ begin
   FakeEpochTicks := FakeEpochTicks + 1;
 end;
 
+function GoldenMonoClock: Double;
+begin
+  Result := 5000;
+end;
+
 function TTestGolden.GoldenText(AFormat: TPromFormat): string;
 var
   R: TPromRegistry;
 begin
   FakeEpochTicks := 0;
   PromEpochClock := @FakeEpoch;
+  PromMonotonicClock := @GoldenMonoClock;
   try
     R := TPromRegistry.Create;
     try
@@ -1367,6 +1392,7 @@ begin
     end;
   finally
     PromEpochClock := nil;
+    PromMonotonicClock := nil;
   end;
 end;
 
@@ -1688,6 +1714,373 @@ begin
   end;
 end;
 
+var
+  MonoNow: Double;
+
+function MonoClock: Double;
+begin
+  Result := MonoNow;
+end;
+
+{ Value after the last space of the first exposition line starting with Prefix; NaN if none. }
+function ValueOfLine(const Text, Prefix: string): Double;
+var
+  L: TStringList;
+  I, P: Integer;
+  S: string;
+begin
+  Result := NaN;
+  L := TStringList.Create;
+  try
+    L.Text := Text;
+    for I := 0 to L.Count - 1 do
+      if Copy(L[I], 1, Length(Prefix)) = Prefix then
+      begin
+        P := LastDelimiter(' ', L[I]);
+        S := Copy(L[I], P + 1, MaxInt);
+        if S = 'NaN' then Exit(NaN);
+        Exit(StrToFloat(S, DefaultFormatSettings));
+      end;
+  finally
+    L.Free;
+  end;
+end;
+
+procedure SortDoubles(var A: array of Double; Lo, Hi: Integer);
+var
+  I, J: Integer;
+  P, T: Double;
+begin
+  I := Lo;
+  J := Hi;
+  P := A[(Lo + Hi) div 2];
+  repeat
+    while A[I] < P do Inc(I);
+    while A[J] > P do Dec(J);
+    if I <= J then
+    begin
+      T := A[I]; A[I] := A[J]; A[J] := T;
+      Inc(I);
+      Dec(J);
+    end;
+  until I > J;
+  if Lo < J then SortDoubles(A, Lo, J);
+  if I < Hi then SortDoubles(A, I, Hi);
+end;
+
+procedure TTestQuantiles.TestSketchAccuracy;
+const
+  N = 5000;
+  Qs: array[0..7] of Double = (0, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 1);
+var
+  Data: array of Double;
+  Sk: TPromSketch;
+  Est: TPromDoubleArray;
+  Dist, I, Q: Integer;
+  Seed: QWord;
+  U, Exact, Rel: Double;
+begin
+  SetLength(Data, N);
+  for Dist := 0 to 2 do
+  begin
+    Seed := 12345 + Dist;
+    for I := 0 to N - 1 do
+    begin
+      Seed := Seed * 6364136223846793005 + 1442695040888963407;   // LCG
+      U := ((Seed shr 11) + 1) / 9007199254740993.0;               // (0, 1)
+      case Dist of
+        0: Data[I] := 0.001 + I * 0.001;          // uniform, 1 ms .. 5 s
+        1: Data[I] := -Ln(U) * 0.05;              // exponential
+        2: Data[I] := 0.001 / Exp(0.7 * Ln(U));   // heavy tail (Pareto-like)
+      end;
+    end;
+    Sk := TPromSketch.Create(PromDefaultSketchOptions);
+    try
+      for I := 0 to N - 1 do
+        Sk.ObserveAt(Data[I], 10);
+      Est := Sk.QuantilesAt(Qs, 10);
+      SortDoubles(Data, 0, N - 1);
+      for Q := 0 to High(Qs) do
+      begin
+        Exact := Data[Trunc(Qs[Q] * (N - 1))];
+        Rel := Abs(Est[Q] - Exact) / Exact;
+        AssertTrue(Format('dist %d q=%g exact=%g est=%g rel=%g', [Dist, Qs[Q], Exact, Est[Q], Rel]),
+          Rel <= 0.0102);
+      end;
+      AssertEquals(N, Sk.CountAt(10));
+    finally
+      Sk.Free;
+    end;
+  end;
+end;
+
+procedure TTestQuantiles.TestSketchWindow;
+var
+  O: TPromSketchOptions;
+  Sk: TPromSketch;
+  Est: TPromDoubleArray;
+  I: Integer;
+begin
+  O := PromDefaultSketchOptions;
+  O.MaxAge := 100;
+  O.AgeSlots := 5;          // slots of 20 s
+  Sk := TPromSketch.Create(O);
+  try
+    for I := 1 to 10 do Sk.ObserveAt(1, 5);        // tick 1
+    for I := 1 to 10 do Sk.ObserveAt(100, 65);     // tick 4
+    AssertEquals(20, Sk.CountAt(65));
+    Est := Sk.QuantilesAt([0, 1], 65);
+    AssertEquals(1, Est[0], 0.011);
+    AssertEquals(100, Est[1], 1.1);
+    // at t=130 (tick 7) the observations of tick 1 are older than the window
+    AssertEquals(10, Sk.CountAt(130));
+    Est := Sk.QuantilesAt([0, 0.5, 1], 130);
+    AssertEquals(100, Est[0], 1.1);
+    AssertEquals(100, Est[2], 1.1);
+    // a new tick that reuses the slot of tick 1 clears it first
+    Sk.ObserveAt(7, 105);                           // tick 6, slot 1 again
+    AssertEquals(11, Sk.CountAt(105));
+    // everything expired
+    AssertEquals(0, Sk.CountAt(1000));
+    Est := Sk.QuantilesAt([0.5], 1000);
+    AssertTrue('empty window is NaN', IsNan(Est[0]));
+  finally
+    Sk.Free;
+  end;
+end;
+
+procedure TTestQuantiles.TestSketchClampAndNan;
+var
+  Sk: TPromSketch;
+  Est: TPromDoubleArray;
+begin
+  Sk := TPromSketch.Create(PromDefaultSketchOptions);
+  try
+    Sk.ObserveAt(0, 1);
+    Sk.ObserveAt(-5, 1);
+    Sk.ObserveAt(NaN, 1);          // ignored
+    Sk.ObserveAt(1e12, 1);         // above MaxValue: clamped
+    AssertEquals(3, Sk.CountAt(1));
+    Est := Sk.QuantilesAt([0, 1], 1);
+    AssertTrue('low clamp ~ MinValue', (Est[0] > 0) and (Est[0] <= 1.1e-9));
+    AssertTrue('high clamp ~ MaxValue', (Est[1] > 0.98e9) and (Est[1] < 1.03e9));
+  finally
+    Sk.Free;
+  end;
+end;
+
+procedure TTestQuantiles.TestSketchOptionsValidation;
+
+  procedure Bad(const O: TPromSketchOptions; const What: string);
+  var
+    Raised: Boolean;
+  begin
+    Raised := False;
+    try
+      TPromSketch.Create(O).Free;
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue(What, Raised);
+  end;
+
+var
+  O: TPromSketchOptions;
+begin
+  O := PromDefaultSketchOptions; O.Accuracy := 0;       Bad(O, 'accuracy 0');
+  O := PromDefaultSketchOptions; O.Accuracy := 0.5;     Bad(O, 'accuracy 0.5');
+  O := PromDefaultSketchOptions; O.MinValue := 0;       Bad(O, 'min 0');
+  O := PromDefaultSketchOptions; O.MaxValue := O.MinValue; Bad(O, 'max = min');
+  O := PromDefaultSketchOptions; O.MaxAge := 0;         Bad(O, 'age 0');
+  O := PromDefaultSketchOptions; O.AgeSlots := 0;       Bad(O, 'slots 0');
+  O := PromDefaultSketchOptions; O.AgeSlots := 1000;    Bad(O, 'slots 1000');
+end;
+
+type
+  TSketchThread = class(TThread)
+  private
+    FSketch: TPromSketch;
+    FSeed: QWord;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(ASketch: TPromSketch; ASeed: QWord);
+  end;
+
+constructor TSketchThread.Create(ASketch: TPromSketch; ASeed: QWord);
+begin
+  FSketch := ASketch;
+  FSeed := ASeed;
+  inherited Create(False);
+end;
+
+procedure TSketchThread.Execute;
+var
+  I: Integer;
+  U: Double;
+begin
+  for I := 1 to 50000 do
+  begin
+    FSeed := FSeed * 6364136223846793005 + 1442695040888963407;
+    U := ((FSeed shr 11) + 1) / 9007199254740993.0;
+    FSketch.ObserveAt(Exp(Ln(1e-6) + U * (Ln(1e6) - Ln(1e-6))), 10);   // 12 decades: many fresh pages
+  end;
+end;
+
+procedure TTestQuantiles.TestSketchConcurrent;
+var
+  Sk: TPromSketch;
+  T: array[0..3] of TSketchThread;
+  I: Integer;
+begin
+  Sk := TPromSketch.Create(PromDefaultSketchOptions);
+  try
+    Sk.ObserveAt(1, 10);     // stamps the slot, so no thread triggers a reset
+    for I := 0 to 3 do
+      T[I] := TSketchThread.Create(Sk, 100 + I);
+    for I := 0 to 3 do
+    begin
+      T[I].WaitFor;
+      T[I].Free;
+    end;
+    // lazy page publication by CAS must not lose or double-count anything
+    AssertEquals(1 + 4 * 50000, Sk.CountAt(10));
+  finally
+    Sk.Free;
+  end;
+end;
+
+procedure TTestQuantiles.TestSummaryOutput;
+var
+  R: TPromRegistry;
+  S: TPromSummary;
+  Text: string;
+  I: Integer;
+begin
+  PromMonotonicClock := @MonoClock;
+  try
+    MonoNow := 1000;
+    R := TPromRegistry.Create;
+    try
+      S := R.Summary('lat_seconds', 'Latency.', ['svc'], [0.5, 0.9, 0.99, 1]);
+      for I := 1 to 100 do
+        S.Labels(['a']).Observe(I * 0.01);
+      S.Labels(['empty']);
+      Text := R.Collect;
+      AssertEquals(0.5, ValueOfLine(Text, 'lat_seconds{svc="a",quantile="0.5"} '), 0.006);
+      AssertEquals(0.9, ValueOfLine(Text, 'lat_seconds{svc="a",quantile="0.9"} '), 0.01);
+      AssertEquals(0.99, ValueOfLine(Text, 'lat_seconds{svc="a",quantile="0.99"} '), 0.011);
+      AssertEquals(1.0, ValueOfLine(Text, 'lat_seconds{svc="a",quantile="1"} '), 0.011);
+      AssertEquals(100, ValueOfLine(Text, 'lat_seconds_count{svc="a"} '), 0);
+      AssertEquals(50.5, ValueOfLine(Text, 'lat_seconds_sum{svc="a"} '), 1e-9);
+      AssertTrue(Text, Pos('lat_seconds{svc="empty",quantile="0.5"} NaN' + #10, Text) > 0);
+      AssertTrue(Text, Pos('# TYPE lat_seconds summary', Text) > 0);
+      // quantile lines come before _sum / _count
+      AssertTrue(Text, Pos('quantile="0.5"', Text) < Pos('lat_seconds_sum{svc="a"}', Text));
+      // OpenMetrics: float quantile label, _created after _count
+      Text := R.Collect(pfOpenMetrics);
+      AssertTrue(Text, Pos('lat_seconds{svc="a",quantile="1.0"} ', Text) > 0);
+      AssertTrue(Text, Pos('lat_seconds_count{svc="a"} 100' + #10 + 'lat_seconds_created{svc="a"} ', Text) > 0);
+    finally
+      R.Free;
+    end;
+  finally
+    PromMonotonicClock := nil;
+  end;
+end;
+
+procedure TTestQuantiles.TestSummaryValidation;
+
+  procedure Bad(const Q: array of Double; const What: string);
+  var
+    R: TPromRegistry;
+    Raised: Boolean;
+  begin
+    Raised := False;
+    R := TPromRegistry.Create;
+    try
+      try
+        R.Summary('x', 'x', [], Q);
+      except
+        on EArgumentException do Raised := True;
+      end;
+    finally
+      R.Free;
+    end;
+    AssertTrue(What, Raised);
+  end;
+
+var
+  R: TPromRegistry;
+  O: TPromSketchOptions;
+  Raised: Boolean;
+begin
+  Bad([1.5], 'above 1');
+  Bad([-0.1], 'below 0');
+  Bad([0.9, 0.5], 'descending');
+  Bad([0.5, 0.5], 'duplicate');
+  Bad([NaN], 'NaN');
+  R := TPromRegistry.Create;
+  try
+    O := PromDefaultSketchOptions;
+    O.Accuracy := 0.9;
+    Raised := False;
+    try
+      R.Summary('y', 'y', [], [0.5], O);
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue('bad options with quantiles', Raised);
+    // options are not checked when there are no quantiles, and the label stays reserved
+    R.Summary('z', 'z', [], [], O);
+    Raised := False;
+    try
+      R.Summary('w', 'w', ['quantile'], [0.5]);
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue('quantile label reserved', Raised);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestQuantiles.TestSummaryWindow;
+var
+  R: TPromRegistry;
+  S: TPromSummary;
+  O: TPromSketchOptions;
+  Text: string;
+begin
+  PromMonotonicClock := @MonoClock;
+  try
+    MonoNow := 100;
+    R := TPromRegistry.Create;
+    try
+      O := PromDefaultSketchOptions;
+      O.MaxAge := 60;
+      O.AgeSlots := 3;
+      S := R.Summary('w_seconds', 'x', [], [0.5], O);
+      S.Observe(2);
+      S.Observe(2);
+      Text := R.Collect;
+      AssertEquals(2, ValueOfLine(Text, 'w_seconds{quantile="0.5"} '), 0.03);
+      MonoNow := 100 + 61;     // the window has moved past the observations
+      Text := R.Collect;
+      AssertTrue(Text, Pos('w_seconds{quantile="0.5"} NaN' + #10, Text) > 0);
+      AssertEquals('count stays cumulative', 2, ValueOfLine(Text, 'w_seconds_count '), 0);
+      S.Observe(8);
+      Text := R.Collect;
+      AssertEquals(8, ValueOfLine(Text, 'w_seconds{quantile="0.5"} '), 0.1);
+      AssertEquals(3, ValueOfLine(Text, 'w_seconds_count '), 0);
+    finally
+      R.Free;
+    end;
+  finally
+    PromMonotonicClock := nil;
+  end;
+end;
+
 procedure TTestServer.TestServeMetrics;
 const
   TestPort = 19187;
@@ -1750,6 +2143,7 @@ end;
 initialization
   RegisterTest(TTestGolden);
   RegisterTest(TTestExemplars);
+  RegisterTest(TTestQuantiles);
   RegisterTest(TTestServer);
   RegisterTest(TTestStress);
   RegisterTest(TTestAtomic);

@@ -78,3 +78,17 @@ exemplar_seconds_bucket{le="1"} 2
 exemplar_seconds_bucket{le="+Inf"} 3
 exemplar_seconds_sum 2.1199999999999997
 exemplar_seconds_count 3
+# HELP quantile_seconds Summary with quantiles.
+# TYPE quantile_seconds summary
+quantile_seconds{svc="a",quantile="0.5"} 0.0501506
+quantile_seconds{svc="a",quantile="0.9"} 0.0895726
+quantile_seconds{svc="a",quantile="0.99"} 0.0989934
+quantile_seconds{svc="a",quantile="1"} 0.100993
+quantile_seconds_sum{svc="a"} 5.050000000000001
+quantile_seconds_count{svc="a"} 100
+quantile_seconds{svc="idle",quantile="0.5"} NaN
+quantile_seconds{svc="idle",quantile="0.9"} NaN
+quantile_seconds{svc="idle",quantile="0.99"} NaN
+quantile_seconds{svc="idle",quantile="1"} NaN
+quantile_seconds_sum{svc="idle"} 0
+quantile_seconds_count{svc="idle"} 0
