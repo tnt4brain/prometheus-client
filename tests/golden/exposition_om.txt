@@ -1,14 +1,14 @@
-# HELP http_requests Total requests.\nSecond line with \\ backslash and \"quotes\".
 # TYPE http_requests counter
+# HELP http_requests Total requests.\nSecond line with \\ backslash and \"quotes\".
 http_requests_total{method="GET",code="200"} 1027
 http_requests_created{method="GET",code="200"} 1700000001
 http_requests_total{method="POST",code="500"} 3
 http_requests_created{method="POST",code="500"} 1700000000
-# HELP temperature_celsius Plain gauge.
 # TYPE temperature_celsius gauge
+# HELP temperature_celsius Plain gauge.
 temperature_celsius -3.5
-# HELP special_values Float formatting corner cases.
 # TYPE special_values gauge
+# HELP special_values Float formatting corner cases.
 special_values{kind="nan"} NaN
 special_values{kind="sum"} 0.30000000000000004
 special_values{kind="huge"} 1e+21
@@ -18,11 +18,11 @@ special_values{kind="large"} 123456789012345680000
 special_values{kind="small"} 0.0000001
 special_values{kind="plus_inf"} +Inf
 special_values{kind="minus_inf"} -Inf
-# HELP escaped_labels Label value escaping.
 # TYPE escaped_labels gauge
+# HELP escaped_labels Label value escaping.
 escaped_labels{path="a\"b\\c\ncafé"} 1
-# HELP rpc_seconds RPC latency.
 # TYPE rpc_seconds histogram
+# HELP rpc_seconds RPC latency.
 rpc_seconds_bucket{svc="a",le="0.1"} 1
 rpc_seconds_bucket{svc="a",le="1.0"} 3
 rpc_seconds_bucket{svc="a",le="+Inf"} 4
@@ -35,64 +35,64 @@ rpc_seconds_bucket{svc="b",le="+Inf"} 0
 rpc_seconds_sum{svc="b"} 0
 rpc_seconds_count{svc="b"} 0
 rpc_seconds_created{svc="b"} 1700000014
-# HELP plain_seconds No labels.
 # TYPE plain_seconds histogram
+# HELP plain_seconds No labels.
 plain_seconds_bucket{le="0.5"} 1
 plain_seconds_bucket{le="+Inf"} 1
 plain_seconds_sum 0.25
 plain_seconds_count 1
 plain_seconds_created 1700000015
-# HELP payload_bytes Payload sizes.
 # TYPE payload_bytes summary
+# HELP payload_bytes Payload sizes.
 payload_bytes_sum 350
 payload_bytes_count 2
 payload_bytes_created 1700000016
-# HELP legacy_value Untyped sample.
 # TYPE legacy_value unknown
+# HELP legacy_value Untyped sample.
 legacy_value 7
-# HELP build Build information.
 # TYPE build info
+# HELP build Build information.
 build_info{version="1.4",commit="abc123"} 1
-# HELP fake_cpu_seconds Callback counter.
 # TYPE fake_cpu_seconds counter
+# HELP fake_cpu_seconds Callback counter.
 fake_cpu_seconds_total 12.5
-# HELP queue_depth Callback family.
 # TYPE queue_depth gauge
+# HELP queue_depth Callback family.
 queue_depth{queue="mail"} 3
 queue_depth{queue="sms"} 0.5
-# HELP capped Capped family.
 # TYPE capped counter
+# HELP capped Capped family.
 capped_total{id="kept"} 1
 capped_created{id="kept"} 1700000019
 capped_total{id="__overflow__"} 5
 capped_created{id="__overflow__"} 1700000020
-# HELP removed Removed child.
 # TYPE removed counter
+# HELP removed Removed child.
 removed_total{id="stays"} 4
 removed_created{id="stays"} 1700000022
-# HELP bare_events Counter without suffix.
 # TYPE bare_events counter
+# HELP bare_events Counter without suffix.
 bare_events_total 2
 bare_events_created 1700000023
-# HELP plain_callback Callback counter without suffix.
 # TYPE plain_callback counter
+# HELP plain_callback Callback counter without suffix.
 plain_callback_total 12.5
-# HELP exemplar_requests Counter with an exemplar.
 # TYPE exemplar_requests counter
+# HELP exemplar_requests Counter with an exemplar.
 exemplar_requests_total{route="/home"} 3 # {trace_id="abc123"} 3 1700000025
 exemplar_requests_created{route="/home"} 1700000024
 exemplar_requests_total{route="/about"} 1
 exemplar_requests_created{route="/about"} 1700000026
-# HELP exemplar_seconds Histogram with exemplars.
 # TYPE exemplar_seconds histogram
+# HELP exemplar_seconds Histogram with exemplars.
 exemplar_seconds_bucket{le="0.1"} 2 # {trace_id="faster"} 0.07 1700000030
 exemplar_seconds_bucket{le="1.0"} 2
 exemplar_seconds_bucket{le="+Inf"} 3 # {trace_id="slow",user="café"} 2 1700000029
 exemplar_seconds_sum 2.1199999999999997
 exemplar_seconds_count 3
 exemplar_seconds_created 1700000027
-# HELP quantile_seconds Summary with quantiles.
 # TYPE quantile_seconds summary
+# HELP quantile_seconds Summary with quantiles.
 quantile_seconds{svc="a",quantile="0.5"} 0.0501506
 quantile_seconds{svc="a",quantile="0.9"} 0.0895726
 quantile_seconds{svc="a",quantile="0.99"} 0.0989934

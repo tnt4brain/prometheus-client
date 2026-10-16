@@ -57,7 +57,9 @@ type
   public
     constructor Create(AFormat: TPromFormat = pfText);
     destructor Destroy; override;
-    procedure WriteHeader(const Name, Help, MetricType: string);
+    { OpenMetrics order is TYPE, UNIT, HELP (the spec says SHOULD); the text format has
+      HELP then TYPE and no UNIT. }
+    procedure WriteHeader(const Name, Help, MetricType: string; const MetricUnit: string = '');
     { Name of the sample lines for a family registered as Name (counters: ..._total in
       OpenMetrics). Suffixes like _bucket/_sum/_count are appended by the caller. }
     function SampleName(const MetricType, Name: string): string;
@@ -260,7 +262,8 @@ begin
   inherited Destroy;
 end;
 
-procedure TPromTextWriter.WriteHeader(const Name, Help, MetricType: string);
+procedure TPromTextWriter.WriteHeader(const Name, Help, MetricType: string;
+  const MetricUnit: string);
 var
   N, T, H: string;
 begin
@@ -282,9 +285,20 @@ begin
       T := 'gauge';
     H := PromEscapeHelp(Help);
   end;
-  if Help <> '' then
-    FOut.WriteString('# HELP ' + N + ' ' + H + #10);
-  FOut.WriteString('# TYPE ' + N + ' ' + T + #10);
+  if FFormat = pfOpenMetrics then
+  begin
+    FOut.WriteString('# TYPE ' + N + ' ' + T + #10);
+    if MetricUnit <> '' then
+      FOut.WriteString('# UNIT ' + N + ' ' + MetricUnit + #10);
+    if Help <> '' then
+      FOut.WriteString('# HELP ' + N + ' ' + H + #10);
+  end
+  else
+  begin
+    if Help <> '' then
+      FOut.WriteString('# HELP ' + N + ' ' + H + #10);
+    FOut.WriteString('# TYPE ' + N + ' ' + T + #10);
+  end;
 end;
 
 procedure TPromTextWriter.WriteSample(const Name, LabelPairs: string; Value: Double;
