@@ -18,7 +18,7 @@ unit prom_metrics;
 interface
 
 uses
-  SysUtils, Classes, prom_atomic, prom_exposition, prom_clock;
+  SysUtils, Classes, DateUtils, prom_atomic, prom_exposition, prom_clock;
 
 type
   TPromMetric = class
@@ -83,6 +83,17 @@ type
 
   { Gauge }
 
+  TPromGaugeChild = class;
+
+  { Returned by TrackInProgress; Done undoes the increment. A plain record: calling
+    Done twice decrements twice. }
+  TPromInProgress = record
+  private
+    FTarget: TPromGaugeChild;
+  public
+    procedure Done;
+  end;
+
   TPromGaugeChild = class(TPromChild)
   private
     FBits: Int64;
@@ -92,6 +103,17 @@ type
     procedure Inc(Delta: Double = 1);
     procedure Dec(Delta: Double = 1);
     procedure SetValue(V: Double);
+    { Unix time in seconds, with fraction (UTC). }
+    procedure SetToCurrentTime;
+    { Increments now; Done decrements, so the gauge counts operations in flight:
+
+        P := InFlight.TrackInProgress;
+        try
+          Handle;
+        finally
+          P.Done;
+        end; }
+    function TrackInProgress: TPromInProgress;
     function Value: Double;
   end;
 
@@ -104,13 +126,14 @@ type
     procedure Inc(Delta: Double = 1);
     procedure Dec(Delta: Double = 1);
     procedure SetValue(V: Double);
+    procedure SetToCurrentTime;
+    function TrackInProgress: TPromInProgress;
     function Value: Double;
   end;
 
-  { Histogram }
+  { Histogram and summary share Observe and the timer. }
 
-  TPromHistogram = class;
-  TPromHistogramChild = class;
+  TPromObserverChild = class;
 
   { Measures elapsed wall time with a monotonic clock and observes it, in seconds:
 
@@ -121,13 +144,23 @@ type
     A plain record: no allocation, nothing happens if ObserveDuration is not called. }
   TPromTimer = record
   private
-    FTarget: TPromHistogramChild;
+    FTarget: TPromObserverChild;
     FStart: Double;
   public
     function ObserveDuration: Double;
   end;
 
-  TPromHistogramChild = class(TPromChild)
+  TPromObserverChild = class(TPromChild)
+  public
+    procedure Observe(V: Double); virtual; abstract;
+    function StartTimer: TPromTimer;
+  end;
+
+  { Histogram }
+
+  TPromHistogram = class;
+
+  TPromHistogramChild = class(TPromObserverChild)
   private
     FOwner: TPromHistogram;
     FCounts: array of Int64;   // per bucket (not cumulative); last = +Inf
@@ -136,8 +169,7 @@ type
     procedure CollectSamples(W: TPromTextWriter; const MetricName: string); override;
   public
     constructor Create(AOwner: TPromHistogram);
-    procedure Observe(V: Double);
-    function StartTimer: TPromTimer;
+    procedure Observe(V: Double); override;
   end;
 
   TPromHistogram = class(TPromFamily)
@@ -150,6 +182,31 @@ type
     constructor Create(const AName, AHelp: string; const ALabelNames: array of string;
       const Buckets: array of Double);
     function Labels(const Values: array of string): TPromHistogramChild;
+    procedure Observe(V: Double);
+    function StartTimer: TPromTimer;
+  end;
+
+  { Summary without quantiles: exposes only _sum and _count, which is a valid summary
+    and enough for rates and averages (rate(x_sum) / rate(x_count)). Cheaper than a
+    histogram when the distribution does not matter. The "quantile" label is reserved. }
+
+  TPromSummaryChild = class(TPromObserverChild)
+  private
+    FCount: Int64;
+    FSumBits: Int64;
+  protected
+    procedure CollectSamples(W: TPromTextWriter; const MetricName: string); override;
+  public
+    procedure Observe(V: Double); override;
+  end;
+
+  TPromSummary = class(TPromFamily)
+  protected
+    function CreateChild: TPromChild; override;
+    function MetricType: string; override;
+  public
+    constructor Create(const AName, AHelp: string; const ALabelNames: array of string);
+    function Labels(const Values: array of string): TPromSummaryChild;
     procedure Observe(V: Double);
     function StartTimer: TPromTimer;
   end;
@@ -416,6 +473,32 @@ begin
   Result := TPromGaugeChild(NoLabelChild).Value;
 end;
 
+procedure TPromGauge.SetToCurrentTime;
+begin
+  TPromGaugeChild(NoLabelChild).SetToCurrentTime;
+end;
+
+function TPromGauge.TrackInProgress: TPromInProgress;
+begin
+  Result := TPromGaugeChild(NoLabelChild).TrackInProgress;
+end;
+
+procedure TPromGaugeChild.SetToCurrentTime;
+begin
+  SetValue((LocalTimeToUniversal(Now) - UnixDateDelta) * SecsPerDay);
+end;
+
+function TPromGaugeChild.TrackInProgress: TPromInProgress;
+begin
+  Inc;
+  Result.FTarget := Self;
+end;
+
+procedure TPromInProgress.Done;
+begin
+  FTarget.Dec;
+end;
+
 { Histogram }
 
 constructor TPromHistogramChild.Create(AOwner: TPromHistogram);
@@ -503,9 +586,58 @@ begin
   Result := TPromHistogramChild(NoLabelChild).StartTimer;
 end;
 
+{ Summary }
+
+procedure TPromSummaryChild.Observe(V: Double);
+begin
+  AtomicAddInt64(FCount, 1);
+  AtomicAddDouble(FSumBits, V);
+end;
+
+procedure TPromSummaryChild.CollectSamples(W: TPromTextWriter; const MetricName: string);
+begin
+  W.WriteSample(MetricName + '_sum', FPairs, AtomicLoadDouble(FSumBits));
+  W.WriteSample(MetricName + '_count', FPairs, AtomicLoadInt64(FCount));
+end;
+
+constructor TPromSummary.Create(const AName, AHelp: string; const ALabelNames: array of string);
+var
+  I: Integer;
+begin
+  for I := 0 to High(ALabelNames) do
+    if ALabelNames[I] = 'quantile' then
+      raise EArgumentException.Create('Label name "quantile" is reserved for summaries');
+  inherited Create(AName, AHelp, ALabelNames);
+end;
+
+function TPromSummary.CreateChild: TPromChild;
+begin
+  Result := TPromSummaryChild.Create;
+end;
+
+function TPromSummary.MetricType: string;
+begin
+  Result := 'summary';
+end;
+
+function TPromSummary.Labels(const Values: array of string): TPromSummaryChild;
+begin
+  Result := TPromSummaryChild(GetChild(Values));
+end;
+
+procedure TPromSummary.Observe(V: Double);
+begin
+  TPromSummaryChild(NoLabelChild).Observe(V);
+end;
+
+function TPromSummary.StartTimer: TPromTimer;
+begin
+  Result := TPromSummaryChild(NoLabelChild).StartTimer;
+end;
+
 { Timer }
 
-function TPromHistogramChild.StartTimer: TPromTimer;
+function TPromObserverChild.StartTimer: TPromTimer;
 begin
   Result.FTarget := Self;
   Result.FStart := PromMonotonicSeconds;

@@ -7,7 +7,7 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testregistry, prom_atomic, prom_metrics, prom_registry,
-  prom_exposition, prom_collectors, Math;
+  prom_exposition, prom_collectors, Math, DateUtils;
 
 type
   TTestAtomic = class(TTestCase)
@@ -38,6 +38,11 @@ type
     procedure TestLabeledTimer;
     procedure TestCallbackFamily;
     procedure TestCallbackFamilyErrors;
+    procedure TestSummary;
+    procedure TestSummaryLabelsAndTimer;
+    procedure TestSummaryReservedLabel;
+    procedure TestSetToCurrentTime;
+    procedure TestTrackInProgress;
   end;
 
   TTestCollectors = class(TTestCase)
@@ -245,6 +250,107 @@ begin
       on EArgumentException do Raised := True;
     end;
     AssertTrue('duplicate label names rejected', Raised);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestSummary;
+var
+  R: TPromRegistry;
+  S: TPromSummary;
+begin
+  R := TPromRegistry.Create;
+  try
+    S := R.Summary('size_bytes', 'Sizes.');
+    S.Observe(100);
+    S.Observe(50.5);
+    AssertEquals('# HELP size_bytes Sizes.' + #10 + '# TYPE size_bytes summary' + #10 +
+      'size_bytes_sum 150.5' + #10 + 'size_bytes_count 2' + #10, R.Collect);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestSummaryLabelsAndTimer;
+var
+  R: TPromRegistry;
+  S: TPromSummary;
+  T: TPromTimer;
+  Text: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    S := R.Summary('job_seconds', 'Jobs.', ['kind']);
+    S.Labels(['a']).Observe(2);
+    T := S.Labels(['b']).StartTimer;
+    T.ObserveDuration;
+    Text := R.Collect;
+    AssertTrue(Text, Pos('job_seconds_sum{kind="a"} 2' + #10, Text) > 0);
+    AssertTrue(Text, Pos('job_seconds_count{kind="a"} 1' + #10, Text) > 0);
+    AssertTrue(Text, Pos('job_seconds_count{kind="b"} 1' + #10, Text) > 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestSummaryReservedLabel;
+var
+  R: TPromRegistry;
+  Raised: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    Raised := False;
+    try
+      R.Summary('x', 'x', ['quantile']);
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue(Raised);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestSetToCurrentTime;
+var
+  R: TPromRegistry;
+  G: TPromGauge;
+  Expected: Double;
+begin
+  R := TPromRegistry.Create;
+  try
+    G := R.Gauge('last_success_seconds', 'Last success.');
+    G.SetToCurrentTime;
+    Expected := (LocalTimeToUniversal(Now) - UnixDateDelta) * SecsPerDay;
+    AssertTrue('epoch seconds', (G.Value > 1.7e9) and (Abs(G.Value - Expected) < 5));
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestTrackInProgress;
+var
+  R: TPromRegistry;
+  G: TPromGauge;
+  P, Q: TPromInProgress;
+begin
+  R := TPromRegistry.Create;
+  try
+    G := R.Gauge('inflight', 'In flight.', ['pool']);
+    P := G.Labels(['a']).TrackInProgress;
+    Q := G.Labels(['a']).TrackInProgress;
+    AssertEquals(2, G.Labels(['a']).Value);
+    P.Done;
+    AssertEquals(1, G.Labels(['a']).Value);
+    Q.Done;
+    AssertEquals(0, G.Labels(['a']).Value);
+    G := R.Gauge('inflight2', 'x');
+    P := G.TrackInProgress;
+    AssertEquals(1, G.Value);
+    P.Done;
+    AssertEquals(0, G.Value);
   finally
     R.Free;
   end;

@@ -8,7 +8,7 @@ Runtime-only package, FCL only (no LCL), so it works in console apps and service
 - `prometheus_fpc.lpk` - the package
 - `src/prom_atomic` - CAS-based atomic Int64/Double
 - `src/prom_exposition` - text format 0.0.4 (escaping, float format, name validation)
-- `src/prom_metrics` - counter, gauge, histogram, untyped, info (optional labels), histogram timer
+- `src/prom_metrics` - counter, gauge (with `SetToCurrentTime`, `TrackInProgress`), histogram, summary (sum/count only), untyped, info (optional labels), timer for histogram/summary
 - `src/prom_clock` - monotonic clock
 - `src/prom_registry` - thread-safe registry, `DefaultRegistry`
 - `src/prom_http` - `MetricsBody` + content type; bring your own HTTP server
