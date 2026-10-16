@@ -56,6 +56,16 @@ type
     procedure TestAllTypesConcurrentWithScrapes;
   end;
 
+  { Byte-for-byte comparison against tests/golden/*.txt. Set PROM_UPDATE_GOLDEN=1 to
+    (re)write the golden file from the current output, then review it with git diff. }
+  TTestGolden = class(TTestCase)
+  private
+    procedure FillQueues(Samples: TPromSamples);
+    procedure CheckGolden(const FileName, Actual: string);
+  published
+    procedure TestFullExposition;
+  end;
+
   TTestServer = class(TTestCase)
   published
     procedure TestServeMetrics;
@@ -1185,6 +1195,130 @@ begin
   end;
 end;
 
+function FakeCpuSeconds(out V: Double): Boolean;
+begin
+  V := 12.5;
+  Result := True;
+end;
+
+function FakeUnavailable(out V: Double): Boolean;
+begin
+  V := 0;
+  Result := False;
+end;
+
+procedure TTestGolden.FillQueues(Samples: TPromSamples);
+begin
+  Samples.Add(['mail'], 3);
+  Samples.Add(['sms'], 0.5);
+end;
+
+procedure TTestGolden.CheckGolden(const FileName, Actual: string);
+var
+  Path, Expected: string;
+  F: TFileStream;
+begin
+  Path := ExtractFilePath(ParamStr(0)) + 'golden' + DirectorySeparator + FileName;
+  if GetEnvironmentVariable('PROM_UPDATE_GOLDEN') = '1' then
+  begin
+    ForceDirectories(ExtractFilePath(Path));
+    F := TFileStream.Create(Path, fmCreate);
+    try
+      if Actual <> '' then
+        F.WriteBuffer(Actual[1], Length(Actual));
+    finally
+      F.Free;
+    end;
+    Exit;
+  end;
+  AssertTrue('golden file missing: ' + Path + ' (run once with PROM_UPDATE_GOLDEN=1)',
+    FileExists(Path));
+  F := TFileStream.Create(Path, fmOpenRead or fmShareDenyNone);
+  try
+    SetLength(Expected, F.Size);
+    if F.Size > 0 then
+      F.ReadBuffer(Expected[1], F.Size);
+  finally
+    F.Free;
+  end;
+  AssertEquals('exposition differs from ' + FileName, Expected, Actual);
+end;
+
+procedure TTestGolden.TestFullExposition;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  G: TPromGauge;
+  H: TPromHistogram;
+  S: TPromSummary;
+  A, B: Double;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('http_requests_total', 'Total requests.' + #10 + 'Second line with \ backslash.',
+      ['method', 'code']);
+    C.Labels(['POST', '500']).Inc(3);
+    C.Labels(['GET', '200']).Inc(1027);
+
+    R.Gauge('temperature_celsius', 'Plain gauge.').SetValue(-3.5);
+
+    G := R.Gauge('special_values', 'Float formatting corner cases.', ['kind']);
+    G.Labels(['nan']).SetValue(NaN);
+    G.Labels(['plus_inf']).SetValue(Infinity);
+    G.Labels(['minus_inf']).SetValue(NegInfinity);
+    // Double variables: a constant 0.1 + 0.2 is folded in Extended on Linux x86_64 (= 0.3)
+    A := 0.1;
+    B := 0.2;
+    G.Labels(['sum']).SetValue(A + B);
+    G.Labels(['large']).SetValue(123456789012345680000.0);
+    G.Labels(['huge']).SetValue(1e21);
+    G.Labels(['small']).SetValue(1e-7);
+    G.Labels(['tiny']).SetValue(1.5e-9);
+    G.Labels(['zero']).SetValue(0);
+
+    R.Gauge('escaped_labels', 'Label value escaping.', ['path']).Labels(
+      ['a"b\c' + #10 + 'caf' + #$C3#$A9]).SetValue(1);
+
+    H := R.Histogram('rpc_seconds', 'RPC latency.', ['svc'], [0.1, 1]);
+    H.Labels(['a']).Observe(0.05);
+    H.Labels(['a']).Observe(0.5);
+    H.Labels(['a']).Observe(0.5);
+    H.Labels(['a']).Observe(2);
+    H.Labels(['b']);   // created but never observed: all-zero series
+
+    R.Histogram('plain_seconds', 'No labels.', [0.5]).Observe(0.25);
+
+    S := R.Summary('payload_bytes', 'Payload sizes.');
+    S.Observe(100);
+    S.Observe(250);
+
+    R.Untyped('legacy_value', 'Untyped sample.').SetValue(7);
+    R.Info('build', 'Build information.', ['version', 'commit']).Publish(['1.4', 'abc123']);
+
+    R.Register(TPromCallbackMetric.Create('fake_cpu_seconds_total', 'Callback counter.',
+      'counter', @FakeCpuSeconds));
+    R.Register(TPromCallbackMetric.Create('fake_unavailable', 'Callback with no value.',
+      'gauge', @FakeUnavailable));
+    R.Register(TPromCallbackFamily.Create('queue_depth', 'Callback family.', 'gauge',
+      ['queue'], @FillQueues));
+
+    C := R.Counter('capped_total', 'Capped family.', ['id']);
+    C.MaxChildren := 1;
+    C.Labels(['kept']).Inc;
+    C.Labels(['dropped_1']).Inc(2);
+    C.Labels(['dropped_2']).Inc(3);
+
+    C := R.Counter('removed_total', 'Removed child.', ['id']);
+    C.Labels(['gone']).Inc;
+    C.Labels(['stays']).Inc(4);
+    C.Remove(['gone']);
+
+    CheckGolden('exposition.txt', R.Collect);
+  finally
+    R.Free;
+  end;
+end;
+
 procedure TTestServer.TestServeMetrics;
 const
   TestPort = 19187;
@@ -1237,6 +1371,7 @@ begin
 end;
 
 initialization
+  RegisterTest(TTestGolden);
   RegisterTest(TTestServer);
   RegisterTest(TTestStress);
   RegisterTest(TTestAtomic);

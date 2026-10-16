@@ -1,0 +1,2 @@
+# Golden exposition files must keep LF line endings byte for byte.
+tests/golden/* -text
