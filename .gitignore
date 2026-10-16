@@ -1,0 +1,9 @@
+lib/
+backup/
+*.exe
+*.o
+*.ppu
+*.compiled
+*.lps
+tests/prom_tests
+examples/metrics_demo
