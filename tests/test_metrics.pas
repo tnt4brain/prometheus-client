@@ -26,6 +26,9 @@ type
     procedure TestConcurrentLabels;
     procedure TestMaxChildrenOverflow;
     procedure TestMaxChildrenConcurrent;
+    procedure TestRemove;
+    procedure TestClear;
+    procedure TestRemoveConcurrent;
   end;
 
   TTestMoreTypes = class(TTestCase)
@@ -750,6 +753,162 @@ begin
     AssertEquals(Sum, SumSeries(S, 'cap_conc_total{'), 0);
   finally
     R.Free;
+  end;
+end;
+
+procedure TTestLabels.TestRemove;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  Old, Fresh: TPromCounterChild;
+  S: string;
+  Raised: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('rm_total', 'x', ['id']);
+    Old := C.Labels(['a']);
+    Old.Inc(4);
+    C.Labels(['b']).Inc;
+    AssertTrue('removed', C.Remove(['a']));
+    AssertFalse('second remove', C.Remove(['a']));
+    AssertFalse('unknown', C.Remove(['zzz']));
+    AssertEquals(1, C.RetiredCount);
+    S := R.Collect;
+    AssertTrue(S, Pos('rm_total{id="a"}', S) = 0);
+    AssertTrue(S, Pos('rm_total{id="b"} 1' + #10, S) > 0);
+    // a cached pointer stays valid: updates are accepted but invisible
+    Old.Inc(100);
+    AssertEquals(104, Old.Value, 0);
+    S := R.Collect;
+    AssertTrue(S, Pos('rm_total{id="a"}', S) = 0);
+    // the same label values start over with a fresh child
+    Fresh := C.Labels(['a']);
+    AssertTrue('different child', Fresh <> Old);
+    Fresh.Inc;
+    S := R.Collect;
+    AssertTrue(S, Pos('rm_total{id="a"} 1' + #10, S) > 0);
+    // errors
+    Raised := False;
+    try
+      C.Remove(['x', 'y']);
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue('count mismatch', Raised);
+    Raised := False;
+    try
+      R.Counter('plain_total', 'x').Remove([]);
+    except
+      on EInvalidOperation do Raised := True;
+    end;
+    AssertTrue('label-less', Raised);
+    // a removed child frees its slot under the cap
+    C.MaxChildren := 2;     // a, b present
+    C.Remove(['b']);
+    C.Labels(['c']).Inc;
+    AssertFalse('slot reused, no overflow', C.Overflowed);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestLabels.TestClear;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  Old: TPromCounterChild;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('clr_total', 'x', ['id']);
+    C.MaxChildren := 1;
+    C.Labels(['a']).Inc;
+    Old := C.Labels(['b']);     // overflow child
+    Old.Inc;
+    AssertTrue(C.Overflowed);
+    C.Clear;
+    AssertFalse('overflow cleared', C.Overflowed);
+    AssertEquals(2, C.RetiredCount);
+    S := R.Collect;
+    AssertTrue(S, Pos('clr_total{', S) = 0);
+    AssertTrue('header still there', Pos('# TYPE clr_total counter', S) > 0);
+    C.Labels(['b']).Inc(3);
+    S := R.Collect;
+    AssertTrue(S, Pos('clr_total{id="b"} 3' + #10, S) > 0);
+    AssertEquals(1, Old.Value, 0);   // orphan untouched
+  finally
+    R.Free;
+  end;
+end;
+
+type
+  TChurnThread = class(TThread)
+  private
+    FFamily: TPromCounter;
+    FSeed: Integer;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AFamily: TPromCounter; ASeed: Integer);
+  end;
+
+constructor TChurnThread.Create(AFamily: TPromCounter; ASeed: Integer);
+begin
+  FFamily := AFamily;
+  FSeed := ASeed;
+  inherited Create(False);
+end;
+
+procedure TChurnThread.Execute;
+var
+  I: Integer;
+  K: string;
+  Cached: TPromCounterChild;
+begin
+  for I := 0 to 19999 do
+  begin
+    K := IntToStr((I + FSeed) mod 50);
+    Cached := FFamily.Labels([K]);
+    Cached.Inc;
+    Cached.Inc;              // pointer may have been retired in between: must stay valid
+    if (I + FSeed) mod 7 = 0 then
+      FFamily.Remove([K]);
+    if I mod 5000 = 4999 then
+      FFamily.Clear;
+  end;
+end;
+
+procedure TTestLabels.TestRemoveConcurrent;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  T: array[0..3] of TChurnThread;
+  I, Scrapes: Integer;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('churn_total', 'x', ['id']);
+    for I := 0 to 3 do
+      T[I] := TChurnThread.Create(C, I);
+    Scrapes := 0;
+    while not (T[0].Finished and T[1].Finished and T[2].Finished and T[3].Finished) do
+    begin
+      S := R.Collect;
+      AssertTrue(S, Pos('# TYPE churn_total counter', S) > 0);
+      Inc(Scrapes);
+    end;
+    for I := 0 to 3 do
+    begin
+      T[I].WaitFor;
+      T[I].Free;
+    end;
+    AssertTrue('some scrapes overlapped', Scrapes > 0);
+    AssertTrue('children were retired', C.RetiredCount > 0);
+  finally
+    R.Free;     // frees every retired child without a crash
   end;
 end;
 

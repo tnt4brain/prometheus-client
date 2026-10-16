@@ -3,8 +3,8 @@ unit prom_metrics;
 { Metric families: counter, gauge, histogram, each with optional labels.
 
   A family owns one child per distinct label-value combination. Children are
-  created on first use and never removed, so a child pointer stays valid for the
-  lifetime of the family. In hot code, cache the child:
+  created on first use. Remove/Clear retire a child instead of freeing it, so a
+  child pointer stays valid for the lifetime of the family. In hot code, cache the child:
 
     Ok := Requests.Labels(['GET', '200']);   // once
     Ok.Inc;                                  // lock-free, per request
@@ -52,6 +52,8 @@ type
     FNoLabels: TPromChild;       // set for label-less families, immutable after Create
     FMaxChildren: Integer;       // 0 = unlimited; guarded by FLock
     FOverflow: TPromChild;       // shared child for combinations beyond the cap
+    FRetired: TList;             // removed children, owned, freed only in Destroy
+    function GetRetiredCount: Integer;
     function MakeKey(const Values: array of string): string;
     procedure SetMaxChildren(Value: Integer);
     function GetOverflowed: Boolean;
@@ -70,6 +72,15 @@ type
       whose label values are all PromOverflowLabelValue; existing children are
       untouched and never evicted. Lowering the cap does not remove children. }
     property MaxChildren: Integer read FMaxChildren write SetMaxChildren;
+    { Stop exposing the series for these label values; True if it existed. The child is
+      retired, not freed (callers may still hold a cached pointer): it keeps accepting
+      updates that no scrape sees, and its memory is released with the family. A later
+      Labels() with the same values creates a fresh child starting from zero. }
+    function Remove(const Values: array of string): Boolean;
+    { Retire every child, including the overflow child; Overflowed becomes False. }
+    procedure Clear;
+    { Number of retired children kept alive until the family is destroyed. }
+    property RetiredCount: Integer read GetRetiredCount;
     { True once any combination has been diverted to the overflow child. }
     property Overflowed: Boolean read GetOverflowed;
   end;
@@ -290,12 +301,19 @@ begin
   FChildren.CaseSensitive := True;
   FChildren.Sorted := True;
   FChildren.OwnsObjects := True;
+  FRetired := TList.Create;
   if Length(FLabelNames) = 0 then
     FNoLabels := CreateChild;   // subclasses must be ready for this before inherited Create
 end;
 
 destructor TPromFamily.Destroy;
+var
+  I: Integer;
 begin
+  if FRetired <> nil then
+    for I := 0 to FRetired.Count - 1 do
+      TObject(FRetired[I]).Free;
+  FRetired.Free;
   FNoLabels.Free;
   FOverflow.Free;
   FChildren.Free;
@@ -331,6 +349,63 @@ begin
     Result := FOverflow <> nil;
   finally
     FLock.EndRead;
+  end;
+end;
+
+function TPromFamily.GetRetiredCount: Integer;
+begin
+  FLock.BeginRead;
+  try
+    Result := FRetired.Count;
+  finally
+    FLock.EndRead;
+  end;
+end;
+
+function TPromFamily.Remove(const Values: array of string): Boolean;
+var
+  Idx: Integer;
+begin
+  if Length(Values) <> Length(FLabelNames) then
+    raise EArgumentException.CreateFmt('Metric "%s" expects %d label value(s), got %d',
+      [FName, Length(FLabelNames), Length(Values)]);
+  if FNoLabels <> nil then
+    raise EInvalidOperation.CreateFmt('Metric "%s" has no labels; nothing to remove', [FName]);
+  FLock.BeginWrite;
+  try
+    Result := FChildren.Find(MakeKey(Values), Idx);
+    if Result then
+    begin
+      FRetired.Add(FChildren.Objects[Idx]);
+      FChildren.Objects[Idx] := nil;   // OwnsObjects would free it on Delete
+      FChildren.Delete(Idx);
+    end;
+  finally
+    FLock.EndWrite;
+  end;
+end;
+
+procedure TPromFamily.Clear;
+var
+  I: Integer;
+begin
+  if FNoLabels <> nil then
+    raise EInvalidOperation.CreateFmt('Metric "%s" has no labels; nothing to clear', [FName]);
+  FLock.BeginWrite;
+  try
+    for I := 0 to FChildren.Count - 1 do
+    begin
+      FRetired.Add(FChildren.Objects[I]);
+      FChildren.Objects[I] := nil;
+    end;
+    FChildren.Clear;
+    if FOverflow <> nil then
+    begin
+      FRetired.Add(FOverflow);
+      FOverflow := nil;
+    end;
+  finally
+    FLock.EndWrite;
   end;
 end;
 
