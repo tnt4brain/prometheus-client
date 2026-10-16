@@ -16,6 +16,7 @@ Runtime-only package, FCL only (no LCL), so it works in console apps and service
 - `src/prom_server` - optional `/metrics` HTTP server (fphttpserver), negotiates text 0.0.4 or OpenMetrics
 - `tests/` - FPCUnit console tests (`lazbuild tests/prom_tests.lpi`)
 - `examples/metrics_demo.lpr` - counter, gauge, histogram, quantile summary, StateSet, exemplars, both output formats
+- `examples/fpweb_metrics.lpr`, `examples/indy_metrics.lpr`, `examples/brook_metrics.lpr` - `/metrics` inside an fpWeb (fcl-web) app, on an Indy 10 `TIdHTTPServer` and on a Brook 5 `TBrookHTTPServer` (needs the native libsagui-3 library)
 - `contrib/mormot/` - optional mORMot 2 integration, a separate package `prometheus_fpc_mormot.lpk`: mount `/metrics` on a mORMot HTTP server (`PromMountMetrics`), publish `TSynMonitor` statistics as metrics, heap metrics for mORMot's memory manager. Tested on Windows x64 against mORMot 2.4-stable; see its README
 
 ## Quick start
