@@ -15,6 +15,7 @@ type
   private
     FLock: TCriticalSection;
     FMetrics: TList;
+    FNames: TStringList;   // every name claimed by a registered metric (see PromClaimedNames)
   public
     constructor Create;
     destructor Destroy; override;
@@ -58,6 +59,10 @@ begin
   inherited Create;
   FLock := TCriticalSection.Create;
   FMetrics := TList.Create;
+  FNames := TStringList.Create;
+  FNames.CaseSensitive := True;
+  FNames.Sorted := True;
+  FNames.Duplicates := dupIgnore;
 end;
 
 destructor TPromRegistry.Destroy;
@@ -67,25 +72,55 @@ begin
   for I := 0 to FMetrics.Count - 1 do
     TObject(FMetrics[I]).Free;
   FMetrics.Free;
+  FNames.Free;
   FLock.Free;
   inherited Destroy;
 end;
 
 function TPromRegistry.Register(M: TPromMetric): TPromMetric;
 var
-  I: Integer;
+  I, Idx: Integer;
+  MName, Clash: string;
+  Claimed: TStringList;
 begin
-  FLock.Enter;
+  MName := M.Name;          // M is freed on failure, so keep what the message needs
+  Clash := '';
+  Claimed := TStringList.Create;
   try
-    for I := 0 to FMetrics.Count - 1 do
-      if TPromMetric(FMetrics[I]).Name = M.Name then
+    PromClaimedNames(M.ExposedType, MName, Claimed);
+    FLock.Enter;
+    try
+      for I := 0 to FMetrics.Count - 1 do
+        if TPromMetric(FMetrics[I]).Name = MName then
+          Clash := 'dup';
+      if Clash = '' then
+        for I := 0 to Claimed.Count - 1 do
+          if FNames.Find(Claimed[I], Idx) then
+          begin
+            Clash := Claimed[I];
+            Break;
+          end;
+      if Clash = '' then
       begin
-        M.Free;
-        raise EArgumentException.CreateFmt('Metric "%s" already registered', [M.Name]);
+        FMetrics.Add(M);
+        for I := 0 to Claimed.Count - 1 do
+          FNames.Add(Claimed[I]);
       end;
-    FMetrics.Add(M);
+    finally
+      FLock.Leave;
+    end;
   finally
-    FLock.Leave;
+    Claimed.Free;
+  end;
+  if Clash <> '' then
+  begin
+    M.Free;
+    if Clash = 'dup' then
+      raise EArgumentException.CreateFmt('Metric "%s" already registered', [MName])
+    else
+      raise EArgumentException.CreateFmt(
+        'Metric "%s" clashes with an existing metric on the name "%s" (OpenMetrics sample names)',
+        [MName, Clash]);
   end;
   Result := M;
 end;

@@ -10,3 +10,4 @@ project README, "Provenance"). Do not reverse a decision here without a new ADR.
 | [0001](0001-lock-free-values-locked-lookup.md) | Lock-free values, locked label lookup |
 | [0002](0002-exemplars-use-a-lock.md) | Exemplar storage uses a per-family lock |
 | [0003](0003-relative-error-quantile-sketch.md) | DDSketch-style sketch for summary quantiles |
+| [0004](0004-strict-name-clash-check.md) | Name clashes are refused as strictly as OpenMetrics needs |

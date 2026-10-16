@@ -39,6 +39,11 @@ function PromStripSuffix(const Name, Suffix: string): string;
 { The metric family name used in OpenMetrics # TYPE/# UNIT/# HELP lines: a counter loses
   "_total", an info metric loses "_info". MetricType is the logical type string. }
 function PromOpenMetricsFamilyName(const MetricType, Name: string): string;
+{ Adds every name a metric of this type claims: its name, its OpenMetrics family name and
+  all sample names it can produce in either format (_total, _created, _bucket, _count, _sum,
+  _gcount, _gsum, _info). Two metrics whose claimed names overlap cannot share a registry
+  without producing an invalid OpenMetrics document. }
+procedure PromClaimedNames(const MetricType, Name: string; Names: TStrings);
 function PromValidMetricName(const S: string): Boolean;
 function PromValidLabelName(const S: string): Boolean;
 { a="x",b="y" with values escaped; Names and Values must have equal length. }
@@ -251,6 +256,42 @@ begin
     Result := PromStripSuffix(Name, '_info')
   else
     Result := Name;
+end;
+
+procedure PromClaimedNames(const MetricType, Name: string; Names: TStrings);
+var
+  Base: string;
+begin
+  Base := PromOpenMetricsFamilyName(MetricType, Name);
+  Names.Add(Name);
+  if Base <> Name then
+    Names.Add(Base);
+  if MetricType = 'counter' then
+  begin
+    Names.Add(Base + '_total');
+    Names.Add(Base + '_created');
+  end
+  else if MetricType = 'info' then
+    Names.Add(Base + '_info')
+  else if MetricType = 'histogram' then
+  begin
+    Names.Add(Name + '_bucket');
+    Names.Add(Name + '_count');
+    Names.Add(Name + '_sum');
+    Names.Add(Name + '_created');
+  end
+  else if MetricType = 'gaugehistogram' then
+  begin
+    Names.Add(Name + '_bucket');
+    Names.Add(Name + '_gcount');
+    Names.Add(Name + '_gsum');
+  end
+  else if MetricType = 'summary' then
+  begin
+    Names.Add(Name + '_count');
+    Names.Add(Name + '_sum');
+    Names.Add(Name + '_created');
+  end;
 end;
 
 function TPromTextWriter.SampleName(const MetricType, Name: string): string;

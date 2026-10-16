@@ -98,6 +98,13 @@ type
     procedure TestUnitValidation;
   end;
 
+  TTestNameClashes = class(TTestCase)
+  published
+    procedure TestClashingFamilies;
+    procedure TestIndependentNames;
+    procedure TestRegistryUsableAfterFailure;
+  end;
+
   TTestServer = class(TTestCase)
   published
     procedure TestServeMetrics;
@@ -2159,6 +2166,102 @@ begin
   end;
 end;
 
+procedure TTestNameClashes.TestClashingFamilies;
+
+  { Registers First, then expects Second to be refused (both orders are tried by the caller). }
+  procedure Clash(const What: string; First, Second: TPromMetric);
+  var
+    R: TPromRegistry;
+    Raised: Boolean;
+  begin
+    R := TPromRegistry.Create;
+    try
+      R.Register(First);
+      Raised := False;
+      try
+        R.Register(Second);
+      except
+        on EArgumentException do Raised := True;
+      end;
+      AssertTrue(What, Raised);
+    finally
+      R.Free;
+    end;
+  end;
+
+  function C(const N: string): TPromMetric;
+  begin
+    Result := TPromCounter.Create(N, 'x', []);
+  end;
+
+  function G(const N: string): TPromMetric;
+  begin
+    Result := TPromGauge.Create(N, 'x', []);
+  end;
+
+begin
+  Clash('counter foo_total vs gauge foo', C('foo_total'), G('foo'));
+  Clash('gauge foo vs counter foo_total', G('foo'), C('foo_total'));
+  Clash('bare counter foo vs gauge foo_total', C('foo'), G('foo_total'));
+  Clash('gauge foo_created vs counter foo_total', G('foo_created'), C('foo_total'));
+  Clash('histogram foo vs gauge foo_count', TPromHistogram.Create('foo', 'x', [], [1]), G('foo_count'));
+  Clash('gauge foo_bucket vs histogram foo', G('foo_bucket'), TPromHistogram.Create('foo', 'x', [], [1]));
+  Clash('summary foo vs gauge foo_sum', TPromSummary.Create('foo', 'x', []), G('foo_sum'));
+  Clash('info build vs gauge build_info', TPromInfo.Create('build', 'x', ['v']), G('build_info'));
+  Clash('info build vs gauge build', TPromInfo.Create('build', 'x', ['v']), G('build'));
+  Clash('counter vs callback counter', C('x_total'),
+    TPromCallbackMetric.Create('x', 'x', 'counter', @FakeCpuSeconds));
+  Clash('exact duplicate', G('same'), G('same'));
+end;
+
+procedure TTestNameClashes.TestIndependentNames;
+var
+  R: TPromRegistry;
+begin
+  R := TPromRegistry.Create;
+  try
+    R.Gauge('foo', 'x');
+    R.Gauge('foo_bytes', 'x');                    // not a sample name of any foo type
+    R.Counter('a_total', 'x');
+    R.Counter('b_total', 'x');
+    R.Histogram('lat_seconds', 'x', [1]);
+    R.Gauge('lat', 'x');                          // histogram lat_seconds does not claim "lat"
+    R.Info('build', 'x', ['v']);                  // claims build, build_info
+    R.Summary('size_bytes', 'x');
+    // the library's own collectors must not clash with each other
+    RegisterProcessMetrics(R);
+    RegisterHeapMetrics(R);
+    AssertTrue(R.Collect, Pos('# TYPE foo gauge', R.Collect) > 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestNameClashes.TestRegistryUsableAfterFailure;
+var
+  R: TPromRegistry;
+  Raised: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    R.Counter('foo_total', 'x');
+    Raised := False;
+    try
+      R.Gauge('foo', 'x');
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue(Raised);
+    // the refused metric claimed nothing: its other names stay free
+    R.Gauge('foo_extra', 'x');
+    R.Counter('foo_total_2', 'x');
+    // and the registry still collects
+    AssertTrue(R.Collect, Pos('foo_total', R.Collect) > 0);
+  finally
+    R.Free;
+  end;
+end;
+
 procedure TTestServer.TestServeMetrics;
 const
   TestPort = 19187;
@@ -2223,6 +2326,7 @@ initialization
   RegisterTest(TTestExemplars);
   RegisterTest(TTestQuantiles);
   RegisterTest(TTestUnits);
+  RegisterTest(TTestNameClashes);
   RegisterTest(TTestServer);
   RegisterTest(TTestStress);
   RegisterTest(TTestAtomic);
