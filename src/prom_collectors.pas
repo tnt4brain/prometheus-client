@@ -13,7 +13,7 @@ unit prom_collectors;
 interface
 
 uses
-  SysUtils, Classes, prom_exposition, prom_metrics, prom_registry;
+  SysUtils, Classes, Math, prom_exposition, prom_metrics, prom_registry, prom_sketch;
 
 type
   { Returns False when the value is unavailable. }
@@ -58,6 +58,41 @@ type
     function ExposedType: string; override;
   end;
 
+  { Receives the series of one scrape from a TPromCallbackGaugeHistogram callback. }
+  TPromGaugeHistogramData = class
+  private
+    FLabelNames: array of string;
+    FPairs: array of string;
+    FBounds: array of TPromDoubleArray;
+    FCounts: array of array of Int64;
+    FSums: array of Double;
+  public
+    { One histogram series. UpperBounds ascending and ending in +Inf (Infinity);
+      CumulativeCounts has one entry per bound and never decreases (the last one is the
+      total count). Raises EArgumentException for anything that breaks these rules. }
+    procedure Add(const LabelValues: array of string; const UpperBounds: array of Double;
+      const CumulativeCounts: array of Int64; Sum: Double);
+  end;
+
+  TPromGaugeHistogramProc = procedure(Data: TPromGaugeHistogramData) of object;
+
+  { A GaugeHistogram (OpenMetrics): a distribution of a quantity that can go down again,
+    e.g. how long the jobs currently queued have been waiting. It is the snapshot of a
+    point in time, so it has no instrument; Proc supplies the buckets on each scrape
+    (on the scraping thread; if it raises, the scrape fails). Samples are _bucket, _gcount
+    and _gsum, without _created or exemplars. The classic text format has no such type and
+    gets "# TYPE name gauge" with the same sample names. }
+  TPromCallbackGaugeHistogram = class(TPromMetric)
+  private
+    FLabelNames: array of string;
+    FProc: TPromGaugeHistogramProc;
+  public
+    constructor Create(const AName, AHelp: string; const ALabelNames: array of string;
+      AProc: TPromGaugeHistogramProc);
+    procedure Collect(W: TPromTextWriter); override;
+    function ExposedType: string; override;
+  end;
+
 { process_cpu_seconds_total, process_resident_memory_bytes, process_virtual_memory_bytes,
   process_start_time_seconds, process_open_fds, and process_max_fds (Unix only). }
 procedure RegisterProcessMetrics(R: TPromRegistry);
@@ -73,7 +108,7 @@ uses
 {$ENDIF}
 {$IFDEF UNIX}
 uses
-  StrUtils, Math;
+  StrUtils;   // Math comes from the interface section
 {$ENDIF}
 
 constructor TPromCallbackMetric.Create(const AName, AHelp, AMetricType: string;
@@ -157,6 +192,103 @@ end;
 function TPromCallbackFamily.ExposedType: string;
 begin
   Result := FType;
+end;
+
+{ TPromGaugeHistogramData }
+
+procedure TPromGaugeHistogramData.Add(const LabelValues: array of string;
+  const UpperBounds: array of Double; const CumulativeCounts: array of Int64; Sum: Double);
+var
+  I, N: Integer;
+begin
+  if Length(LabelValues) <> Length(FLabelNames) then
+    raise EArgumentException.CreateFmt('Expected %d label value(s), got %d',
+      [Length(FLabelNames), Length(LabelValues)]);
+  if Length(UpperBounds) = 0 then
+    raise EArgumentException.Create('A gauge histogram needs at least the +Inf bucket');
+  if Length(CumulativeCounts) <> Length(UpperBounds) then
+    raise EArgumentException.Create('UpperBounds and CumulativeCounts must have the same length');
+  for I := 0 to High(UpperBounds) do
+  begin
+    // IsNan first: comparing a NaN raises EInvalidOp instead of returning False
+    if IsNan(UpperBounds[I]) then
+      raise EArgumentException.Create('A bucket bound cannot be NaN');
+    if (I > 0) and not (UpperBounds[I] > UpperBounds[I - 1]) then
+      raise EArgumentException.Create('Bucket bounds must be strictly ascending');
+    if CumulativeCounts[I] < 0 then
+      raise EArgumentException.Create('Bucket counts cannot be negative');
+    if (I > 0) and (CumulativeCounts[I] < CumulativeCounts[I - 1]) then
+      raise EArgumentException.Create('Cumulative bucket counts cannot decrease');
+  end;
+  if not (IsInfinite(UpperBounds[High(UpperBounds)]) and (UpperBounds[High(UpperBounds)] > 0)) then
+    raise EArgumentException.Create('The last bucket bound must be +Inf');
+  N := Length(FPairs);
+  SetLength(FPairs, N + 1);
+  SetLength(FBounds, N + 1);
+  SetLength(FCounts, N + 1);
+  SetLength(FSums, N + 1);
+  FPairs[N] := PromFormatLabelPairs(FLabelNames, LabelValues);
+  SetLength(FBounds[N], Length(UpperBounds));
+  SetLength(FCounts[N], Length(UpperBounds));
+  for I := 0 to High(UpperBounds) do
+  begin
+    FBounds[N][I] := UpperBounds[I];
+    FCounts[N][I] := CumulativeCounts[I];
+  end;
+  FSums[N] := Sum;
+end;
+
+{ TPromCallbackGaugeHistogram }
+
+constructor TPromCallbackGaugeHistogram.Create(const AName, AHelp: string;
+  const ALabelNames: array of string; AProc: TPromGaugeHistogramProc);
+var
+  I, J: Integer;
+begin
+  inherited Create(AName, AHelp);
+  SetLength(FLabelNames, Length(ALabelNames));
+  for I := 0 to High(ALabelNames) do
+  begin
+    if not PromValidLabelName(ALabelNames[I]) then
+      raise EArgumentException.CreateFmt('Invalid label name "%s"', [ALabelNames[I]]);
+    if ALabelNames[I] = 'le' then
+      raise EArgumentException.Create('Label name "le" is reserved for histograms');
+    for J := 0 to I - 1 do
+      if FLabelNames[J] = ALabelNames[I] then
+        raise EArgumentException.CreateFmt('Duplicate label name "%s"', [ALabelNames[I]]);
+    FLabelNames[I] := ALabelNames[I];
+  end;
+  FProc := AProc;
+end;
+
+function TPromCallbackGaugeHistogram.ExposedType: string;
+begin
+  Result := 'gaugehistogram';
+end;
+
+procedure TPromCallbackGaugeHistogram.Collect(W: TPromTextWriter);
+var
+  D: TPromGaugeHistogramData;
+  I, J: Integer;
+  Sep: string;
+begin
+  D := TPromGaugeHistogramData.Create;
+  try
+    D.FLabelNames := FLabelNames;
+    FProc(D);
+    W.WriteHeader(Name, Help, 'gaugehistogram', MetricUnit);
+    for I := 0 to High(D.FPairs) do
+    begin
+      if D.FPairs[I] = '' then Sep := '' else Sep := D.FPairs[I] + ',';
+      for J := 0 to High(D.FBounds[I]) do
+        W.WriteSample(Name + '_bucket', Sep + 'le="' + W.FormatLe(D.FBounds[I][J]) + '"',
+          D.FCounts[I][J]);
+      W.WriteSample(Name + '_gcount', D.FPairs[I], D.FCounts[I][High(D.FCounts[I])]);
+      W.WriteSample(Name + '_gsum', D.FPairs[I], D.FSums[I]);
+    end;
+  finally
+    D.Free;
+  end;
 end;
 
 { ---- process, Windows ---- }

@@ -62,6 +62,7 @@ type
   private
     procedure FillQueues(Samples: TPromSamples);
     procedure CheckGolden(const FileName, Actual: string);
+    procedure FillGaugeHistogram(Data: TPromGaugeHistogramData);
     procedure FillGoldenRegistry(R: TPromRegistry);
     function GoldenText(AFormat: TPromFormat): string;
   published
@@ -112,6 +113,16 @@ type
     procedure TestValidation;
     procedure TestSetOnlyIsAtomic;
     procedure TestSetStateConcurrent;
+  end;
+
+  TTestGaugeHistograms = class(TTestCase)
+  private
+    FMode: Integer;
+    procedure Fill(Data: TPromGaugeHistogramData);
+  published
+    procedure TestOutput;
+    procedure TestInvalidData;
+    procedure TestNameClashes;
   end;
 
   TTestServer = class(TTestCase)
@@ -1261,6 +1272,12 @@ begin
   Samples.Add(['sms'], 0.5);
 end;
 
+procedure TTestGolden.FillGaugeHistogram(Data: TPromGaugeHistogramData);
+begin
+  Data.Add(['fast'], [-1, 0.5, Infinity], [1, 4, 9], -2.5);
+  Data.Add(['slow'], [1, Infinity], [0, 0], 0);
+end;
+
 procedure TTestGolden.CheckGolden(const FileName, Actual: string);
 var
   Path, Expected: string;
@@ -1299,6 +1316,7 @@ var
   H: TPromHistogram;
   S: TPromSummary;
   SS: TPromStateSet;
+  GH: TPromCallbackGaugeHistogram;
   A, B: Double;
   I: Integer;
 begin
@@ -1390,6 +1408,12 @@ begin
       ['idle', 'running', 'failed', 'caf' + #$C3#$A9 + ' "x"']);
     SS.Labels(['nightly']).SetOnly('running');
     SS.Labels(['weekly']);   // every state false
+
+    // gauge histogram (callback only): negative bounds and a negative sum are allowed
+    GH := TPromCallbackGaugeHistogram.Create('queue_wait_seconds', 'Waiting jobs.', ['pool'],
+      @FillGaugeHistogram);
+    GH.MetricUnit := 'seconds';
+    R.Register(GH);
   end;
 end;
 
@@ -2502,6 +2526,104 @@ begin
   end;
 end;
 
+procedure TTestGaugeHistograms.Fill(Data: TPromGaugeHistogramData);
+begin
+  case FMode of
+    0: Data.Add([], [0.1, 1, Infinity], [2, 5, 6], 3.5);
+    1: Data.Add(['x'], [0.1, 1, Infinity], [2, 5, 6], 3.5);     // wrong label count
+    2: Data.Add([], [1, 2], [1, 2], 0);                         // no +Inf bucket
+    3: Data.Add([], [2, 1, Infinity], [1, 2, 3], 0);            // not ascending
+    4: Data.Add([], [1, Infinity], [1], 0);                     // length mismatch
+    5: Data.Add([], [1, 2, Infinity], [3, 2, 4], 0);            // decreasing counts
+    6: Data.Add([], [NaN, Infinity], [1, 2], 0);                // NaN bound
+    7: Data.Add([], [], [], 0);                                 // empty
+    8: Data.Add([], [1, Infinity], [-1, 2], 0);                 // negative count
+    9: Data.Add([], [NegInfinity], [1], 0);                     // last bound is -Inf
+  end;
+end;
+
+procedure TTestGaugeHistograms.TestOutput;
+var
+  R: TPromRegistry;
+  S: string;
+begin
+  FMode := 0;
+  R := TPromRegistry.Create;
+  try
+    R.Register(TPromCallbackGaugeHistogram.Create('pending_seconds', 'Pending.', [], @Fill));
+    S := R.Collect(pfOpenMetrics);
+    AssertEquals('# TYPE pending_seconds gaugehistogram' + #10 + '# HELP pending_seconds Pending.' + #10 +
+      'pending_seconds_bucket{le="0.1"} 2' + #10 + 'pending_seconds_bucket{le="1.0"} 5' + #10 +
+      'pending_seconds_bucket{le="+Inf"} 6' + #10 + 'pending_seconds_gcount 6' + #10 +
+      'pending_seconds_gsum 3.5' + #10 + '# EOF' + #10, S);
+    // the classic format has no such type: a gauge with the same sample names
+    S := R.Collect;
+    AssertEquals('# HELP pending_seconds Pending.' + #10 + '# TYPE pending_seconds gauge' + #10 +
+      'pending_seconds_bucket{le="0.1"} 2' + #10 + 'pending_seconds_bucket{le="1"} 5' + #10 +
+      'pending_seconds_bucket{le="+Inf"} 6' + #10 + 'pending_seconds_gcount 6' + #10 +
+      'pending_seconds_gsum 3.5' + #10, S);
+    AssertTrue('no _created for gauge histograms', Pos('_created', R.Collect(pfOpenMetrics)) = 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestGaugeHistograms.TestInvalidData;
+var
+  R: TPromRegistry;
+  Raised: Boolean;
+  I: Integer;
+begin
+  R := TPromRegistry.Create;
+  try
+    R.Register(TPromCallbackGaugeHistogram.Create('bad_seconds', 'x', [], @Fill));
+    for I := 1 to 9 do
+    begin
+      FMode := I;
+      Raised := False;
+      try
+        R.Collect(pfOpenMetrics);
+      except
+        on EArgumentException do Raised := True;
+      end;
+      AssertTrue('invalid data, mode ' + IntToStr(FMode), Raised);
+    end;
+    FMode := 0;          // and the registry recovers once the callback behaves
+    AssertTrue(R.Collect, Pos('bad_seconds_gcount 6', R.Collect) > 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestGaugeHistograms.TestNameClashes;
+var
+  R: TPromRegistry;
+  Raised: Boolean;
+begin
+  FMode := 0;
+  R := TPromRegistry.Create;
+  try
+    R.Register(TPromCallbackGaugeHistogram.Create('wait', 'x', [], @Fill));
+    Raised := False;
+    try
+      R.Gauge('wait_gcount', 'x');
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue('wait_gcount clashes', Raised);
+    Raised := False;
+    try
+      R.Gauge('wait_bucket', 'x');
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue('wait_bucket clashes', Raised);
+    R.Gauge('wait_other', 'x');   // unrelated names are fine
+  finally
+    R.Free;
+  end;
+end;
+
 procedure TTestServer.TestServeMetrics;
 const
   TestPort = 19187;
@@ -2568,6 +2690,7 @@ initialization
   RegisterTest(TTestUnits);
   RegisterTest(TTestNameClashes);
   RegisterTest(TTestStateSets);
+  RegisterTest(TTestGaugeHistograms);
   RegisterTest(TTestServer);
   RegisterTest(TTestStress);
   RegisterTest(TTestAtomic);

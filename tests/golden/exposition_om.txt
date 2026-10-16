@@ -121,4 +121,16 @@ job_phase{job="nightly",job_phase="idle"} 0
 job_phase{job="nightly",job_phase="running"} 1
 job_phase{job="nightly",job_phase="failed"} 0
 job_phase{job="nightly",job_phase="café \"x\""} 0
+# TYPE queue_wait_seconds gaugehistogram
+# UNIT queue_wait_seconds seconds
+# HELP queue_wait_seconds Waiting jobs.
+queue_wait_seconds_bucket{pool="fast",le="-1.0"} 1
+queue_wait_seconds_bucket{pool="fast",le="0.5"} 4
+queue_wait_seconds_bucket{pool="fast",le="+Inf"} 9
+queue_wait_seconds_gcount{pool="fast"} 9
+queue_wait_seconds_gsum{pool="fast"} -2.5
+queue_wait_seconds_bucket{pool="slow",le="1.0"} 0
+queue_wait_seconds_bucket{pool="slow",le="+Inf"} 0
+queue_wait_seconds_gcount{pool="slow"} 0
+queue_wait_seconds_gsum{pool="slow"} 0
 # EOF
