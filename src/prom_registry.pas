@@ -39,6 +39,9 @@ type
     function Untyped(const Name, Help: string): TPromUntyped; overload;
     function Untyped(const Name, Help: string; const LabelNames: array of string): TPromUntyped; overload;
     function Info(const Name, Help: string; const LabelNames: array of string): TPromInfo;
+    { See TPromStateSet: pass [] for LabelNames if there are none. }
+    function StateSet(const Name, Help: string; const LabelNames: array of string;
+      const States: array of string): TPromStateSet;
     function Collect(AFormat: TPromFormat = pfText): string;
   end;
 
@@ -197,6 +200,12 @@ function TPromRegistry.Info(const Name, Help: string;
   const LabelNames: array of string): TPromInfo;
 begin
   Result := Register(TPromInfo.Create(Name, Help, LabelNames)) as TPromInfo;
+end;
+
+function TPromRegistry.StateSet(const Name, Help: string; const LabelNames: array of string;
+  const States: array of string): TPromStateSet;
+begin
+  Result := Register(TPromStateSet.Create(Name, Help, LabelNames, States)) as TPromStateSet;
 end;
 
 function TPromRegistry.Collect(AFormat: TPromFormat): string;

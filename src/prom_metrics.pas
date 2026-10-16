@@ -314,6 +314,53 @@ type
     function Publish(const Values: array of string): TPromInfoChild;
   end;
 
+  { StateSet: a fixed list of named boolean states, e.g. the phases of a state machine.
+    Every scrape writes one sample per state with value 0 or 1, the state name in a label
+    named after the metric itself:
+
+      Phase := Registry.StateSet('job_phase', 'Current phase.', [], ['idle', 'running', 'failed']);
+      Phase.SetOnly('running');      // exactly one state true, changed atomically
+      Phase.SetState('failed', True);   // or flip single states
+
+    All states live in one atomic bitmask, so a scrape never sees a half-applied SetOnly.
+    At most 63 states. The classic text format has no stateset type and gets a gauge. }
+
+  TPromStateSet = class;
+
+  TPromStateSetChild = class(TPromChild)
+  private
+    FOwner: TPromStateSet;
+    FMask: Int64;   // bit I = state I is true
+  protected
+    procedure CollectSamples(W: TPromTextWriter; const MetricName: string); override;
+  public
+    constructor Create(AOwner: TPromStateSet);
+    procedure SetState(const State: string; Value: Boolean);
+    { Makes State the only true state in one atomic step. }
+    procedure SetOnly(const State: string);
+    { Makes every state false in one atomic step. }
+    procedure ClearAll;
+    function IsSet(const State: string): Boolean;
+  end;
+
+  TPromStateSet = class(TPromFamily)
+  private
+    FStates: array of string;
+    function StateIndex(const State: string): Integer;
+  protected
+    function CreateChild: TPromChild; override;
+    function MetricType: string; override;
+  public
+    { The metric name doubles as the state label's name, so it must be a valid label name
+      (no colon) and must not also be one of ALabelNames. States: 1..63 distinct names. }
+    constructor Create(const AName, AHelp: string; const ALabelNames: array of string;
+      const AStates: array of string);
+    function Labels(const Values: array of string): TPromStateSetChild;
+    { Shortcuts for a family without labels. }
+    procedure SetState(const State: string; Value: Boolean);
+    procedure SetOnly(const State: string);
+  end;
+
 implementation
 
 { TPromMetric }
@@ -1053,6 +1100,110 @@ end;
 function TPromInfo.Publish(const Values: array of string): TPromInfoChild;
 begin
   Result := TPromInfoChild(GetChild(Values));
+end;
+
+{ StateSet }
+
+constructor TPromStateSetChild.Create(AOwner: TPromStateSet);
+begin
+  inherited Create;
+  FOwner := AOwner;
+end;
+
+procedure TPromStateSetChild.SetState(const State: string; Value: Boolean);
+var
+  Bit, Old: Int64;
+begin
+  Bit := Int64(1) shl FOwner.StateIndex(State);   // Int64(): a plain 1 shl is 32 bits wide
+  repeat
+    Old := AtomicLoadInt64(FMask);
+  until InterlockedCompareExchange64(FMask, (Old and not Bit) or (Ord(Value) * Bit), Old) = Old;
+end;
+
+procedure TPromStateSetChild.SetOnly(const State: string);
+begin
+  AtomicStoreInt64(FMask, Int64(1) shl FOwner.StateIndex(State));
+end;
+
+procedure TPromStateSetChild.ClearAll;
+begin
+  AtomicStoreInt64(FMask, 0);
+end;
+
+function TPromStateSetChild.IsSet(const State: string): Boolean;
+begin
+  Result := (AtomicLoadInt64(FMask) and (Int64(1) shl FOwner.StateIndex(State))) <> 0;
+end;
+
+procedure TPromStateSetChild.CollectSamples(W: TPromTextWriter; const MetricName: string);
+var
+  Mask: Int64;
+  I: Integer;
+  Sep, StateLabel: string;
+begin
+  Mask := AtomicLoadInt64(FMask);
+  if FPairs = '' then Sep := '' else Sep := FPairs + ',';
+  StateLabel := FOwner.Name + '="';
+  for I := 0 to High(FOwner.FStates) do
+    W.WriteSample(MetricName, Sep + StateLabel + PromEscapeLabelValue(FOwner.FStates[I]) + '"',
+      (Mask shr I) and 1);
+end;
+
+constructor TPromStateSet.Create(const AName, AHelp: string; const ALabelNames: array of string;
+  const AStates: array of string);
+var
+  I, J: Integer;
+begin
+  if not PromValidLabelName(AName) then
+    raise EArgumentException.CreateFmt('A stateset name doubles as a label name and "%s" is not one', [AName]);
+  for I := 0 to High(ALabelNames) do
+    if ALabelNames[I] = AName then
+      raise EArgumentException.CreateFmt('Label name "%s" is the stateset''s own name', [AName]);
+  if (Length(AStates) < 1) or (Length(AStates) > 63) then
+    raise EArgumentException.Create('A stateset needs between 1 and 63 states');
+  // the states must be ready before inherited Create builds the label-less child
+  SetLength(FStates, Length(AStates));
+  for I := 0 to High(AStates) do
+  begin
+    for J := 0 to I - 1 do
+      if FStates[J] = AStates[I] then
+        raise EArgumentException.CreateFmt('Duplicate state "%s"', [AStates[I]]);
+    FStates[I] := AStates[I];
+  end;
+  inherited Create(AName, AHelp, ALabelNames);
+end;
+
+function TPromStateSet.StateIndex(const State: string): Integer;
+begin
+  for Result := 0 to High(FStates) do
+    if FStates[Result] = State then
+      Exit;
+  raise EArgumentException.CreateFmt('Unknown state "%s" for "%s"', [State, FName]);
+end;
+
+function TPromStateSet.CreateChild: TPromChild;
+begin
+  Result := TPromStateSetChild.Create(Self);
+end;
+
+function TPromStateSet.MetricType: string;
+begin
+  Result := 'stateset';
+end;
+
+function TPromStateSet.Labels(const Values: array of string): TPromStateSetChild;
+begin
+  Result := TPromStateSetChild(GetChild(Values));
+end;
+
+procedure TPromStateSet.SetState(const State: string; Value: Boolean);
+begin
+  TPromStateSetChild(NoLabelChild).SetState(State, Value);
+end;
+
+procedure TPromStateSet.SetOnly(const State: string);
+begin
+  TPromStateSetChild(NoLabelChild).SetOnly(State);
 end;
 
 end.

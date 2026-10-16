@@ -111,4 +111,14 @@ quantile_seconds{svc="idle",quantile="1.0"} NaN
 quantile_seconds_sum{svc="idle"} 0
 quantile_seconds_count{svc="idle"} 0
 quantile_seconds_created{svc="idle"} 1700000032
+# TYPE job_phase stateset
+# HELP job_phase Phase of the job.
+job_phase{job="weekly",job_phase="idle"} 0
+job_phase{job="weekly",job_phase="running"} 0
+job_phase{job="weekly",job_phase="failed"} 0
+job_phase{job="weekly",job_phase="café \"x\""} 0
+job_phase{job="nightly",job_phase="idle"} 0
+job_phase{job="nightly",job_phase="running"} 1
+job_phase{job="nightly",job_phase="failed"} 0
+job_phase{job="nightly",job_phase="café \"x\""} 0
 # EOF

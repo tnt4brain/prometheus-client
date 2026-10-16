@@ -105,6 +105,15 @@ type
     procedure TestRegistryUsableAfterFailure;
   end;
 
+  TTestStateSets = class(TTestCase)
+  published
+    procedure TestOutput;
+    procedure TestHighBits;
+    procedure TestValidation;
+    procedure TestSetOnlyIsAtomic;
+    procedure TestSetStateConcurrent;
+  end;
+
   TTestServer = class(TTestCase)
   published
     procedure TestServeMetrics;
@@ -1289,6 +1298,7 @@ var
   G: TPromGauge;
   H: TPromHistogram;
   S: TPromSummary;
+  SS: TPromStateSet;
   A, B: Double;
   I: Integer;
 begin
@@ -1374,6 +1384,12 @@ begin
     for I := 1 to 100 do
       S.Labels(['a']).Observe(I * 0.001);
     S.Labels(['idle']);   // no observations: NaN quantiles
+
+    // stateset: one sample per state, the state label is named after the metric
+    SS := R.StateSet('job_phase', 'Phase of the job.', ['job'],
+      ['idle', 'running', 'failed', 'caf' + #$C3#$A9 + ' "x"']);
+    SS.Labels(['nightly']).SetOnly('running');
+    SS.Labels(['weekly']);   // every state false
   end;
 end;
 
@@ -2262,6 +2278,230 @@ begin
   end;
 end;
 
+procedure TTestStateSets.TestOutput;
+var
+  R: TPromRegistry;
+  P: TPromStateSet;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    P := R.StateSet('phase', 'Current phase.', [], ['idle', 'busy']);
+    P.SetOnly('busy');
+    S := R.Collect(pfOpenMetrics);
+    AssertEquals('# TYPE phase stateset' + #10 + '# HELP phase Current phase.' + #10 +
+      'phase{phase="idle"} 0' + #10 + 'phase{phase="busy"} 1' + #10 + '# EOF' + #10, S);
+    // the classic format has no stateset type: a gauge with the same samples
+    S := R.Collect;
+    AssertEquals('# HELP phase Current phase.' + #10 + '# TYPE phase gauge' + #10 +
+      'phase{phase="idle"} 0' + #10 + 'phase{phase="busy"} 1' + #10, S);
+    P.SetState('idle', True);       // flips one state, leaves the other
+    AssertTrue(R.Collect, Pos('phase{phase="idle"} 1' + #10 + 'phase{phase="busy"} 1', R.Collect) > 0);
+    P.SetState('busy', False);
+    AssertTrue(R.Collect, Pos('phase{phase="idle"} 1' + #10 + 'phase{phase="busy"} 0', R.Collect) > 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestStateSets.TestHighBits;
+const
+  N = 63;
+var
+  R: TPromRegistry;
+  States: array of string;
+  Child: TPromStateSetChild;
+  I, Ones: Integer;
+  S: string;
+begin
+  SetLength(States, N);
+  for I := 0 to N - 1 do
+    States[I] := 's' + IntToStr(I);
+  R := TPromRegistry.Create;
+  try
+    Child := R.StateSet('big', 'x', ['k'], States).Labels(['a']);
+    Child.SetOnly('s35');                 // a plain "1 shl 35" would wrap in 32 bits
+    for I := 0 to N - 1 do
+      AssertEquals('only s35 is set (' + IntToStr(I) + ')', I = 35, Child.IsSet(States[I]));
+    Child.SetOnly('s62');
+    AssertTrue(Child.IsSet('s62') and not Child.IsSet('s35') and not Child.IsSet('s30'));
+    Child.SetState('s33', True);
+    Child.SetState('s1', True);
+    AssertTrue(Child.IsSet('s33') and Child.IsSet('s1') and Child.IsSet('s62'));
+    Child.SetState('s62', False);
+    S := R.Collect;
+    Ones := 0;
+    for I := 0 to N - 1 do
+      if Pos('big{k="a",big="s' + IntToStr(I) + '"} 1' + #10, S) > 0 then Inc(Ones);
+    AssertEquals(2, Ones);                // s1 and s33
+    Child.ClearAll;
+    AssertTrue(not Child.IsSet('s1') and not Child.IsSet('s33'));
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestStateSets.TestValidation;
+
+  procedure Bad(const AName: string; const Labels, States: array of string; const What: string);
+  var
+    R: TPromRegistry;
+    Raised: Boolean;
+  begin
+    Raised := False;
+    R := TPromRegistry.Create;
+    try
+      try
+        R.StateSet(AName, 'x', Labels, States);
+      except
+        on EArgumentException do Raised := True;
+      end;
+    finally
+      R.Free;
+    end;
+    AssertTrue(What, Raised);
+  end;
+
+var
+  R: TPromRegistry;
+  Raised: Boolean;
+  States: array of string;
+  I: Integer;
+begin
+  Bad('has:colon', [], ['a'], 'name is not a valid label name');
+  Bad('own', ['own'], ['a'], 'label named like the metric');
+  Bad('dup', [], ['a', 'a'], 'duplicate state');
+  Bad('none', [], [], 'no states');
+  SetLength(States, 64);
+  for I := 0 to 63 do States[I] := 's' + IntToStr(I);
+  Bad('toomany', [], States, 'more than 63 states');
+  R := TPromRegistry.Create;
+  try
+    with R.StateSet('ok', 'x', [], ['a', 'b']) do
+    begin
+      Raised := False;
+      try SetOnly('c'); except on EArgumentException do Raised := True; end;
+      AssertTrue('unknown state', Raised);
+      Raised := False;
+      try MetricUnit := 'seconds'; except on EArgumentException do Raised := True; end;
+      AssertTrue('stateset cannot have a unit', Raised);
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
+type
+  TPhaseThread = class(TThread)
+  private
+    FSet: TPromStateSet;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(ASet: TPromStateSet);
+  end;
+
+constructor TPhaseThread.Create(ASet: TPromStateSet);
+begin
+  FSet := ASet;
+  inherited Create(False);
+end;
+
+procedure TPhaseThread.Execute;
+var
+  I: Integer;
+begin
+  for I := 0 to 99999 do
+    case I mod 3 of
+      0: FSet.SetOnly('a');
+      1: FSet.SetOnly('b');
+      2: FSet.SetOnly('c');
+    end;
+end;
+
+procedure TTestStateSets.TestSetOnlyIsAtomic;
+var
+  R: TPromRegistry;
+  P: TPromStateSet;
+  T: array[0..2] of TPhaseThread;
+  I, Ones, Scrapes: Integer;
+  S: string;
+  Done: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    P := R.StateSet('flip', 'x', [], ['a', 'b', 'c']);
+    P.SetOnly('a');
+    for I := 0 to 2 do T[I] := TPhaseThread.Create(P);
+    Scrapes := 0;
+    repeat
+      Done := True;
+      for I := 0 to 2 do if not T[I].Finished then Done := False;
+      S := R.Collect;
+      Ones := 0;
+      for I := 0 to 2 do
+        if Pos('flip{flip="' + Chr(Ord('a') + I) + '"} 1' + #10, S) > 0 then Inc(Ones);
+      AssertEquals('exactly one state true in every scrape: ' + S, 1, Ones);
+      Inc(Scrapes);
+    until Done;
+    for I := 0 to 2 do begin T[I].WaitFor; T[I].Free; end;
+    AssertTrue(Scrapes > 1);
+  finally
+    R.Free;
+  end;
+end;
+
+type
+  TToggleThread = class(TThread)
+  private
+    FChild: TPromStateSetChild;
+    FState: string;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AChild: TPromStateSetChild; const AState: string);
+  end;
+
+constructor TToggleThread.Create(AChild: TPromStateSetChild; const AState: string);
+begin
+  FChild := AChild;
+  FState := AState;
+  inherited Create(False);
+end;
+
+procedure TToggleThread.Execute;
+var
+  I: Integer;
+begin
+  for I := 0 to 49999 do
+    FChild.SetState(FState, Odd(I));   // the last iteration, I = 49999, sets True
+end;
+
+procedure TTestStateSets.TestSetStateConcurrent;
+const
+  N = 8;
+var
+  R: TPromRegistry;
+  States: array of string;
+  Child: TPromStateSetChild;
+  T: array[0..N - 1] of TToggleThread;
+  I: Integer;
+begin
+  SetLength(States, N);
+  for I := 0 to N - 1 do States[I] := 't' + IntToStr(I * 7);   // spread over the mask
+  R := TPromRegistry.Create;
+  try
+    Child := R.StateSet('tog', 'x', ['k'], States).Labels(['a']);
+    for I := 0 to N - 1 do T[I] := TToggleThread.Create(Child, States[I]);
+    for I := 0 to N - 1 do begin T[I].WaitFor; T[I].Free; end;
+    // each thread owns one bit; concurrent CAS updates of the shared mask must not lose any
+    for I := 0 to N - 1 do
+      AssertTrue('state ' + States[I] + ' ends true', Child.IsSet(States[I]));
+  finally
+    R.Free;
+  end;
+end;
+
 procedure TTestServer.TestServeMetrics;
 const
   TestPort = 19187;
@@ -2327,6 +2567,7 @@ initialization
   RegisterTest(TTestQuantiles);
   RegisterTest(TTestUnits);
   RegisterTest(TTestNameClashes);
+  RegisterTest(TTestStateSets);
   RegisterTest(TTestServer);
   RegisterTest(TTestStress);
   RegisterTest(TTestAtomic);

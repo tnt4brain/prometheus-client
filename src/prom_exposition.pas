@@ -332,8 +332,8 @@ begin
   else
   begin
     N := Name;
-    if T = 'info' then
-      T := 'gauge';
+    if (T = 'info') or (T = 'stateset') or (T = 'gaugehistogram') then
+      T := 'gauge';   // not representable in the classic format
     H := PromEscapeHelp(Help);
   end;
   if FFormat = pfOpenMetrics then
