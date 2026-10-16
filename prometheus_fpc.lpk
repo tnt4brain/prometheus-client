@@ -52,6 +52,10 @@
         <Filename Value="src/prom_sketch.pas"/>
         <UnitName Value="prom_sketch"/>
       </Item>
+      <Item>
+        <Filename Value="src/prom_push.pas"/>
+        <UnitName Value="prom_push"/>
+      </Item>
     </Files>
     <RequiredPkgs>
       <Item>

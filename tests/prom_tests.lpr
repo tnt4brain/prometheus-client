@@ -5,7 +5,7 @@ program prom_tests;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  Classes, consoletestrunner, test_metrics;
+  Classes, consoletestrunner, test_metrics, test_push;
 
 
 var

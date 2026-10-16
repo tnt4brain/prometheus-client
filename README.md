@@ -14,8 +14,10 @@ Runtime-only package, FCL only (no LCL), so it works in console apps and service
 - `src/prom_http` - `MetricsBody` + content type; bring your own HTTP server
 - `src/prom_collectors` - process and FPC heap metrics, labelled callback metrics, computed on scrape
 - `src/prom_server` - optional `/metrics` HTTP server (fphttpserver), negotiates text 0.0.4 or OpenMetrics
+- `src/prom_push` - optional Pushgateway client (`PromPush`, `PromPushAdd`, `PromPushDelete`, `TPromPusher` with basic auth and timeout) for short-lived jobs; checked against Pushgateway 1.11.4
 - `tests/` - FPCUnit console tests (`lazbuild tests/prom_tests.lpi`)
 - `examples/metrics_demo.lpr` - counter, gauge, histogram, quantile summary, StateSet, exemplars, both output formats
+- `examples/push_demo.lpr` - a batch job pushing its metrics to a Pushgateway
 - `examples/fpweb_metrics.lpr`, `examples/indy_metrics.lpr`, `examples/brook_metrics.lpr` - `/metrics` inside an fpWeb (fcl-web) app, on an Indy 10 `TIdHTTPServer` and on a Brook 5 `TBrookHTTPServer` (needs the native libsagui-3 library)
 - `contrib/mormot/` - optional mORMot 2 integration, a separate package `prometheus_fpc_mormot.lpk`: mount `/metrics` on a mORMot HTTP server (`PromMountMetrics`), publish `TSynMonitor` statistics as metrics, heap metrics for mORMot's memory manager. Tested on Windows x64 against mORMot 2.4-stable; see its README
 
