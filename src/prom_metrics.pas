@@ -107,11 +107,17 @@ type
 
   TPromCounterChild = class(TPromChild)
   private
-    FBits: Int64;
+    FBits: Int64;               // the value when not striped
+    FRaw: Pointer;              // striped: raw block, FCells is 64-byte aligned inside it
+    FCells: PInt64;             // one cache line (8 Int64) per stripe; cell I is FCells[I * 8]
+    FMask: Integer;             // stripe count - 1 (a power of two)
     FExemplar: TPromExemplar;   // latest exemplar; guarded by FExLock
+    procedure Add(Delta: Double);
   protected
     procedure CollectSamples(W: TPromTextWriter; const MetricName: string); override;
   public
+    constructor CreateStriped(AStripes: Integer);
+    destructor Destroy; override;
     procedure Inc(Delta: Double = 1);
     { Inc plus an exemplar (alternating label name, value: ['trace_id', 'abc']) that is
       shown on the _total sample in OpenMetrics output. The exemplar is validated first:
@@ -122,10 +128,20 @@ type
   end;
 
   TPromCounter = class(TPromFamily)
+  private
+    FStripes: Integer;
   protected
     function CreateChild: TPromChild; override;
     function MetricType: string; override;
   public
+    constructor Create(const AName, AHelp: string; const ALabelNames: array of string); overload;
+    { Stripes: 1 (the default) is a single atomic cell. Higher values (rounded up to a
+      power of two, at most 64) give each child that many cache-line-sized cells and
+      spread threads over them, trading 64 bytes per stripe per child for far less CAS
+      contention on one hot counter. Value sums the cells, so it is monotonic but not
+      an instantaneous snapshot while increments are in flight. }
+    constructor Create(const AName, AHelp: string; const ALabelNames: array of string;
+      AStripes: Integer); overload;
     function Labels(const Values: array of string): TPromCounterChild;
     { Shortcuts for a family without labels. }
     procedure Inc(Delta: Double = 1);
@@ -648,16 +664,64 @@ end;
 
 { Counter }
 
+const
+  CounterMaxStripes = 64;
+  CounterCellBytes = 64;   // one cache line per stripe, so stripes never share a line
+
+constructor TPromCounterChild.CreateStriped(AStripes: Integer);
+var
+  N: Integer;
+begin
+  inherited Create;
+  if AStripes <= 1 then
+    Exit;
+  N := 2;
+  while (N < AStripes) and (N < CounterMaxStripes) do
+    N := N * 2;
+  GetMem(FRaw, N * CounterCellBytes + CounterCellBytes - 1);
+  FillChar(FRaw^, N * CounterCellBytes + CounterCellBytes - 1, 0);
+  FCells := PInt64((PtrUInt(FRaw) + CounterCellBytes - 1) and not PtrUInt(CounterCellBytes - 1));
+  FMask := N - 1;
+end;
+
+destructor TPromCounterChild.Destroy;
+begin
+  if FRaw <> nil then
+    FreeMem(FRaw);
+  inherited Destroy;
+end;
+
+procedure TPromCounterChild.Add(Delta: Double);
+var
+  H: QWord;
+begin
+  if FCells = nil then
+    AtomicAddDouble(FBits, Delta)
+  else
+  begin
+    {$PUSH}{$Q-}{$R-}
+    H := (QWord(PtrUInt(GetCurrentThreadId)) * QWord($9E3779B97F4A7C15)) shr 40;
+    {$POP}
+    AtomicAddDouble(PInt64(PByte(FCells) + Integer(H and QWord(FMask)) * CounterCellBytes)^, Delta);
+  end;
+end;
+
 procedure TPromCounterChild.Inc(Delta: Double);
 begin
   if Delta < 0 then
     raise EArgumentException.Create('Counter cannot decrease');
-  AtomicAddDouble(FBits, Delta);
+  Add(Delta);
 end;
 
 function TPromCounterChild.Value: Double;
+var
+  I: Integer;
 begin
-  Result := AtomicLoadDouble(FBits);
+  if FCells = nil then
+    Exit(AtomicLoadDouble(FBits));
+  Result := 0;
+  for I := 0 to FMask do
+    Result := Result + AtomicLoadDouble(PInt64(PByte(FCells) + I * CounterCellBytes)^);
 end;
 
 procedure TPromCounterChild.IncWithExemplar(Delta: Double; const ExemplarLabels: array of string);
@@ -668,7 +732,7 @@ begin
     raise EArgumentException.Create('Counter cannot decrease');
   // validate and format before touching anything, so a rejected exemplar changes nothing
   Ex := PromMakeExemplar(ExemplarLabels, Delta, PromEpochSeconds);
-  AtomicAddDouble(FBits, Delta);
+  Add(Delta);
   FExLock.Enter;
   try
     FExemplar := Ex;
@@ -695,9 +759,21 @@ begin
   WriteCreated(W, PromStripSuffix(MetricName, '_total'));
 end;
 
+constructor TPromCounter.Create(const AName, AHelp: string; const ALabelNames: array of string);
+begin
+  Create(AName, AHelp, ALabelNames, 1);
+end;
+
+constructor TPromCounter.Create(const AName, AHelp: string; const ALabelNames: array of string;
+  AStripes: Integer);
+begin
+  FStripes := AStripes;   // must be set before inherited Create builds the label-less child
+  inherited Create(AName, AHelp, ALabelNames);
+end;
+
 function TPromCounter.CreateChild: TPromChild;
 begin
-  Result := TPromCounterChild.Create;
+  Result := TPromCounterChild.CreateStriped(FStripes);
 end;
 
 function TPromCounter.MetricType: string;

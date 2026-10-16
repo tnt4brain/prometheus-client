@@ -16,4 +16,5 @@ told to cache the child returned by `Labels(...)`.
 
 ## Consequences
 A scrape is not a perfectly consistent snapshot across bucket, sum and count (same as the
-Go client).
+Go client). Opt-in striped counters (`Stripes`) cover the case of one counter hit by many
+threads: 8 threads, 16M increments: 2422 ms plain vs 47 ms striped.

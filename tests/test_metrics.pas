@@ -2683,7 +2683,148 @@ begin
   end;
 end;
 
+{ Striped counters }
+
+type
+  TTestStriped = class(TTestCase)
+  published
+    procedure TestSameOutputAsPlain;
+    procedure TestStripeCounts;
+    procedure TestExemplarAndValidation;
+    procedure TestConcurrentSumAndMonotonicValue;
+  end;
+
+  TStripeThread = class(TThread)
+  private
+    FChild: TPromCounterChild;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AChild: TPromCounterChild);
+  end;
+
+constructor TStripeThread.Create(AChild: TPromCounterChild);
+begin
+  FChild := AChild;
+  inherited Create(False);
+end;
+
+procedure TStripeThread.Execute;
+var
+  I: Integer;
+begin
+  for I := 1 to 50000 do
+    FChild.Inc;
+end;
+
+procedure TTestStriped.TestSameOutputAsPlain;
+var
+  R: TPromRegistry;
+  P, S: TPromCounter;
+begin
+  R := TPromRegistry.Create;
+  try
+    P := R.Counter('plain_total', 'x', ['k']);
+    S := R.Counter('striped_total', 'x', ['k'], 8);
+    P.Labels(['a']).Inc(2.5);
+    S.Labels(['a']).Inc(2.5);
+    P.Labels(['b']).Inc;
+    S.Labels(['b']).Inc;
+    AssertEquals(2.5, S.Labels(['a']).Value, 0);
+    AssertTrue('striped sample', Pos('striped_total{k="a"} 2.5' + #10, R.Collect) > 0);
+    AssertTrue('striped sample b', Pos('striped_total{k="b"} 1' + #10, R.Collect) > 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestStriped.TestStripeCounts;
+const
+  Counts: array[0..8] of Integer = (-3, 0, 1, 2, 3, 5, 64, 65, 1000);
+var
+  R: TPromRegistry;
+  N, I: Integer;
+  C: TPromCounter;
+begin
+  // odd, huge, zero and negative counts must all work (rounded or treated as unstriped)
+  R := TPromRegistry.Create;
+  try
+    for I := 0 to High(Counts) do
+    begin
+      N := Counts[I];
+      C := R.Counter('c' + IntToStr(N + 5) + '_total', 'x', [], N);
+      C.Inc;
+      C.Inc(2);
+      AssertEquals('stripes ' + IntToStr(N), 3, C.Value, 0);
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestStriped.TestExemplarAndValidation;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  Raised: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('ex_total', 'x', [], 4);
+    C.IncWithExemplar(2, ['trace_id', 'abc']);
+    AssertEquals(2, C.Value, 0);
+    AssertTrue('exemplar', Pos('# {trace_id="abc"} 2', R.Collect(pfOpenMetrics)) > 0);
+    Raised := False;
+    try
+      C.Inc(-1);
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue('negative rejected', Raised);
+    AssertEquals(2, C.Value, 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestStriped.TestConcurrentSumAndMonotonicValue;
+const
+  Workers = 8;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  T: array[0..Workers - 1] of TStripeThread;
+  I: Integer;
+  V, Last: Double;
+  Done: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('conc_total', 'x', [], 16);
+    for I := 0 to Workers - 1 do
+      T[I] := TStripeThread.Create(C.Labels([]));
+    Last := 0;
+    repeat
+      Done := True;
+      for I := 0 to Workers - 1 do
+        if not T[I].Finished then Done := False;
+      V := C.Value;
+      AssertTrue('value never goes backwards', V >= Last);
+      Last := V;
+    until Done;
+    for I := 0 to Workers - 1 do
+    begin
+      T[I].WaitFor;
+      T[I].Free;
+    end;
+    AssertEquals('exact total', Double(Workers * 50000), C.Value, 0);
+  finally
+    R.Free;
+  end;
+end;
+
 initialization
+  RegisterTest(TTestStriped);
   RegisterTest(TTestGolden);
   RegisterTest(TTestExemplars);
   RegisterTest(TTestQuantiles);

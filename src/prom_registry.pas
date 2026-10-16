@@ -23,6 +23,9 @@ type
     function Register(M: TPromMetric): TPromMetric;
     function Counter(const Name, Help: string): TPromCounter; overload;
     function Counter(const Name, Help: string; const LabelNames: array of string): TPromCounter; overload;
+    { Striped counter for a very hot path: see TPromCounter.Create. }
+    function Counter(const Name, Help: string; const LabelNames: array of string;
+      Stripes: Integer): TPromCounter; overload;
     function Gauge(const Name, Help: string): TPromGauge; overload;
     function Gauge(const Name, Help: string; const LabelNames: array of string): TPromGauge; overload;
     function Histogram(const Name, Help: string; const Buckets: array of Double): TPromHistogram; overload;
@@ -137,6 +140,12 @@ function TPromRegistry.Counter(const Name, Help: string;
   const LabelNames: array of string): TPromCounter;
 begin
   Result := Register(TPromCounter.Create(Name, Help, LabelNames)) as TPromCounter;
+end;
+
+function TPromRegistry.Counter(const Name, Help: string; const LabelNames: array of string;
+  Stripes: Integer): TPromCounter;
+begin
+  Result := Register(TPromCounter.Create(Name, Help, LabelNames, Stripes)) as TPromCounter;
 end;
 
 function TPromRegistry.Gauge(const Name, Help: string): TPromGauge;
