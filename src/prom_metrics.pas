@@ -20,6 +20,10 @@ interface
 uses
   SysUtils, Classes, DateUtils, prom_atomic, prom_exposition, prom_clock;
 
+const
+  { Label value used on the shared child that absorbs combinations over MaxChildren. }
+  PromOverflowLabelValue = '__overflow__';
+
 type
   TPromMetric = class
   private
@@ -46,7 +50,12 @@ type
     FLock: TMultiReadExclusiveWriteSynchronizer;
     FChildren: TStringList;      // sorted by key; objects are owned
     FNoLabels: TPromChild;       // set for label-less families, immutable after Create
+    FMaxChildren: Integer;       // 0 = unlimited; guarded by FLock
+    FOverflow: TPromChild;       // shared child for combinations beyond the cap
     function MakeKey(const Values: array of string): string;
+    procedure SetMaxChildren(Value: Integer);
+    function GetOverflowed: Boolean;
+    function OverflowChild: TPromChild;   // caller holds the write lock
   protected
     function CreateChild: TPromChild; virtual; abstract;
     function MetricType: string; virtual; abstract;
@@ -56,6 +65,13 @@ type
     constructor Create(const AName, AHelp: string; const ALabelNames: array of string);
     destructor Destroy; override;
     procedure Collect(W: TPromTextWriter); override;
+    { Cardinality cap, 0 (the default) = unlimited. Once the family holds this many
+      label combinations, Labels() for any new combination returns one shared child
+      whose label values are all PromOverflowLabelValue; existing children are
+      untouched and never evicted. Lowering the cap does not remove children. }
+    property MaxChildren: Integer read FMaxChildren write SetMaxChildren;
+    { True once any combination has been diverted to the overflow child. }
+    property Overflowed: Boolean read GetOverflowed;
   end;
 
   { Counter }
@@ -281,6 +297,7 @@ end;
 destructor TPromFamily.Destroy;
 begin
   FNoLabels.Free;
+  FOverflow.Free;
   FChildren.Free;
   FLock.Free;
   inherited Destroy;
@@ -293,6 +310,44 @@ begin
   Result := '';
   for I := 0 to High(Values) do
     Result := Result + IntToStr(Length(Values[I])) + ':' + Values[I];
+end;
+
+procedure TPromFamily.SetMaxChildren(Value: Integer);
+begin
+  if Value < 0 then
+    raise EArgumentException.Create('MaxChildren cannot be negative');
+  FLock.BeginWrite;
+  try
+    FMaxChildren := Value;
+  finally
+    FLock.EndWrite;
+  end;
+end;
+
+function TPromFamily.GetOverflowed: Boolean;
+begin
+  FLock.BeginRead;
+  try
+    Result := FOverflow <> nil;
+  finally
+    FLock.EndRead;
+  end;
+end;
+
+function TPromFamily.OverflowChild: TPromChild;
+var
+  Values: array of string;
+  I: Integer;
+begin
+  if FOverflow = nil then
+  begin
+    SetLength(Values, Length(FLabelNames));
+    for I := 0 to High(Values) do
+      Values[I] := PromOverflowLabelValue;
+    FOverflow := CreateChild;
+    FOverflow.FPairs := PromFormatLabelPairs(FLabelNames, Values);
+  end;
+  Result := FOverflow;
 end;
 
 function TPromFamily.NoLabelChild: TPromChild;
@@ -318,7 +373,9 @@ begin
   FLock.BeginRead;
   try
     if FChildren.Find(Key, Idx) then
-      Result := TPromChild(FChildren.Objects[Idx]);
+      Result := TPromChild(FChildren.Objects[Idx])
+    else if (FOverflow <> nil) and (FMaxChildren > 0) and (FChildren.Count >= FMaxChildren) then
+      Result := FOverflow;   // already capped: stay on the read lock
   finally
     FLock.EndRead;
   end;
@@ -329,6 +386,8 @@ begin
   try
     if FChildren.Find(Key, Idx) then   // another thread may have won the race
       Result := TPromChild(FChildren.Objects[Idx])
+    else if (FMaxChildren > 0) and (FChildren.Count >= FMaxChildren) then
+      Result := OverflowChild
     else
     begin
       Result := CreateChild;
@@ -357,6 +416,8 @@ begin
     try
       for I := 0 to FChildren.Count - 1 do
         Snapshot.Add(FChildren.Objects[I]);
+      if FOverflow <> nil then
+        Snapshot.Add(FOverflow);
     finally
       FLock.EndRead;
     end;

@@ -24,6 +24,8 @@ type
     procedure TestLabeledHistogramOutput;
     procedure TestEscapedLabelValue;
     procedure TestConcurrentLabels;
+    procedure TestMaxChildrenOverflow;
+    procedure TestMaxChildrenConcurrent;
   end;
 
   TTestMoreTypes = class(TTestCase)
@@ -443,6 +445,11 @@ begin
     AssertTrue(S, Pos(#10 + 'process_virtual_memory_bytes ', S) > 0);
     AssertTrue(S, Pos(#10 + 'process_start_time_seconds 1', S) > 0);  // epoch seconds, 10 digits
     AssertTrue(S, Pos(#10 + 'process_open_fds ', S) > 0);
+    {$IFDEF UNIX}
+    AssertTrue(S, Pos(#10 + 'process_max_fds ', S) > 0);
+    {$ELSE}
+    AssertTrue(S, Pos('process_max_fds', S) = 0);
+    {$ENDIF}
   finally
     R.Free;
   end;
@@ -606,6 +613,141 @@ begin
       on EInvalidOperation do Raised := True;
     end;
     AssertTrue('unlabelled use of labelled family', Raised);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestLabels.TestMaxChildrenOverflow;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  Over: TPromCounterChild;
+  S: string;
+  Raised: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('capped_total', 'Capped', ['a', 'b']);
+    C.MaxChildren := 2;
+    C.Labels(['1', 'x']).Inc;
+    C.Labels(['2', 'y']).Inc;
+    AssertFalse('not overflowed yet', C.Overflowed);
+    Over := C.Labels(['3', 'z']);
+    Over.Inc(5);
+    AssertTrue('overflowed', C.Overflowed);
+    AssertTrue('shared overflow child', Over = C.Labels(['4', 'w']));
+    C.Labels(['4', 'w']).Inc(2);
+    AssertEquals(7, Over.Value, 0);
+    // existing combinations keep working and are not diverted
+    C.Labels(['1', 'x']).Inc;
+    S := R.Collect;
+    AssertTrue(S, Pos('capped_total{a="1",b="x"} 2' + #10, S) > 0);
+    AssertTrue(S, Pos('capped_total{a="2",b="y"} 1' + #10, S) > 0);
+    AssertTrue(S, Pos('capped_total{a="__overflow__",b="__overflow__"} 7' + #10, S) > 0);
+    // raising the cap lets new combinations through again
+    C.MaxChildren := 3;
+    C.Labels(['5', 'v']).Inc;
+    S := R.Collect;
+    AssertTrue(S, Pos('capped_total{a="5",b="v"} 1' + #10, S) > 0);
+    Raised := False;
+    try
+      C.MaxChildren := -1;
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue('negative cap rejected', Raised);
+  finally
+    R.Free;
+  end;
+end;
+
+{ Sum of the values of all exposition lines that start with Prefix. }
+function SumSeries(const Text, Prefix: string): Double;
+var
+  L: TStringList;
+  I, P: Integer;
+begin
+  Result := 0;
+  L := TStringList.Create;
+  try
+    L.Text := Text;
+    for I := 0 to L.Count - 1 do
+      if Copy(L[I], 1, Length(Prefix)) = Prefix then
+      begin
+        P := LastDelimiter(' ', L[I]);
+        Result := Result + StrToFloat(Copy(L[I], P + 1, MaxInt), DefaultFormatSettings);
+      end;
+  finally
+    L.Free;
+  end;
+end;
+
+type
+  TCapThread = class(TThread)
+  private
+    FFamily: TPromCounter;
+    FSeed: Integer;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AFamily: TPromCounter; ASeed: Integer);
+  end;
+
+constructor TCapThread.Create(AFamily: TPromCounter; ASeed: Integer);
+begin
+  FFamily := AFamily;
+  FSeed := ASeed;
+  inherited Create(False);
+end;
+
+procedure TCapThread.Execute;
+var
+  I: Integer;
+begin
+  for I := 0 to 4999 do
+    FFamily.Labels([IntToStr(FSeed * 100000 + I)]).Inc;
+end;
+
+procedure TTestLabels.TestMaxChildrenConcurrent;
+const
+  Cap = 100;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  T: array[0..3] of TCapThread;
+  I, Lines: Integer;
+  S: string;
+  P: Integer;
+  Sum: Double;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('cap_conc_total', 'x', ['id']);
+    C.MaxChildren := Cap;
+    for I := 0 to 3 do
+      T[I] := TCapThread.Create(C, I);
+    for I := 0 to 3 do
+    begin
+      T[I].WaitFor;
+      T[I].Free;
+    end;
+    S := R.Collect;
+    Lines := 0;
+    P := Pos(#10 + 'cap_conc_total{', S);
+    while P > 0 do
+    begin
+      Inc(Lines);
+      P := Pos(#10 + 'cap_conc_total{', S, P + 1);
+    end;
+    AssertEquals('series = cap + overflow', Cap + 1, Lines);
+    AssertTrue('overflowed', C.Overflowed);
+    // no increment lost: every Labels() call landed on some child
+    Sum := 0;
+    for I := 0 to 3 do
+      Sum := Sum + 5000;
+    AssertTrue(S, Pos('cap_conc_total{id="__overflow__"} ', S) > 0);
+    AssertEquals(Sum, SumSeries(S, 'cap_conc_total{'), 0);
   finally
     R.Free;
   end;

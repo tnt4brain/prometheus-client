@@ -57,7 +57,7 @@ type
   end;
 
 { process_cpu_seconds_total, process_resident_memory_bytes, process_virtual_memory_bytes,
-  process_start_time_seconds, process_open_fds. }
+  process_start_time_seconds, process_open_fds, and process_max_fds (Unix only). }
 procedure RegisterProcessMetrics(R: TPromRegistry);
 
 { fpc_heap_size_bytes, fpc_heap_used_bytes, fpc_heap_free_bytes. }
@@ -71,7 +71,7 @@ uses
 {$ENDIF}
 {$IFDEF UNIX}
 uses
-  StrUtils;
+  StrUtils, Math;
 {$ENDIF}
 
 constructor TPromCallbackMetric.Create(const AName, AHelp, AMetricType: string;
@@ -369,6 +369,43 @@ begin
   end;
   V := N - 1;  // the directory handle used for this listing
 end;
+
+{ Soft limit from the "Max open files  <soft>  <hard>  files" line of /proc/self/limits;
+  "unlimited" becomes +Inf. }
+function ProcMaxFds(out V: Double): Boolean;
+var
+  L: TStringList;
+  I: Integer;
+  Tok: string;
+  P: Integer;
+begin
+  Result := False;
+  L := TStringList.Create;
+  try
+    try
+      L.LoadFromFile('/proc/self/limits');
+    except
+      Exit;
+    end;
+    for I := 0 to L.Count - 1 do
+      if Copy(L[I], 1, 14) = 'Max open files' then
+      begin
+        Tok := Trim(Copy(L[I], 15, MaxInt));
+        P := Pos(' ', Tok);
+        if P > 0 then
+          Tok := Copy(Tok, 1, P - 1);
+        if Tok = 'unlimited' then
+          V := Infinity
+        else if StrToInt64Def(Tok, -1) >= 0 then
+          V := StrToInt64(Tok)
+        else
+          Exit;
+        Exit(True);
+      end;
+  finally
+    L.Free;
+  end;
+end;
 {$ENDIF}
 
 procedure RegisterProcessMetrics(R: TPromRegistry);
@@ -383,6 +420,10 @@ begin
     'Start time of the process since unix epoch in seconds.', 'gauge', @ProcStartTime));
   R.Register(TPromCallbackMetric.Create('process_open_fds',
     'Number of open file descriptors (handles on Windows).', 'gauge', @ProcOpenFds));
+  {$IFDEF UNIX}
+  R.Register(TPromCallbackMetric.Create('process_max_fds',
+    'Maximum number of open file descriptors.', 'gauge', @ProcMaxFds));
+  {$ENDIF}
 end;
 
 { ---- FPC heap ---- }
