@@ -52,16 +52,61 @@ begin
   Result := StringReplace(Result, #10, '\n', [rfReplaceAll]);
 end;
 
+{ Shortest decimal text that parses back to the same Double. Str() with a width
+  yields exactly P significant digits (FloatToStrF caps Double at 15); 15 digits
+  with trailing zeros stripped is already the shortest form when it round-trips,
+  and 17 always does. }
 function PromFormatFloat(V: Double): string;
+var
+  P, E, N, K: Integer;
+  S, Digits, Sign: string;
+  Back: Double;
 begin
   if IsNan(V) then
-    Result := 'NaN'
-  else if IsInfinite(V) then
+    Exit('NaN');
+  if IsInfinite(V) then
   begin
-    if V > 0 then Result := '+Inf' else Result := '-Inf';
+    if V > 0 then Exit('+Inf') else Exit('-Inf');
+  end;
+  for P := 15 to 17 do
+  begin
+    Str(V:(P + 7), S);  // ' d.dddE+xxx' (sign or space first)
+    S := Trim(S);
+    if (P = 17) or (TryStrToFloat(S, Back, PromFormat) and (Back = V)) then
+      Break;
+  end;
+  Sign := '';
+  if S[1] = '-' then
+  begin
+    Sign := '-';
+    Delete(S, 1, 1);
+  end;
+  K := Pos('E', S);
+  E := StrToInt(Copy(S, K + 1, MaxInt));
+  Digits := S[1] + Copy(S, 3, K - 3);
+  N := Length(Digits);
+  while (N > 1) and (Digits[N] = '0') do
+    Dec(N);
+  SetLength(Digits, N);
+  if (E >= 0) and (E < 21) then
+  begin
+    if N <= E + 1 then
+      Result := Digits + StringOfChar('0', E + 1 - N)
+    else
+      Result := Copy(Digits, 1, E + 1) + '.' + Copy(Digits, E + 2, MaxInt);
   end
+  else if (E < 0) and (E >= -7) then
+    Result := '0.' + StringOfChar('0', -E - 1) + Digits
   else
-    Result := FloatToStr(V, PromFormat);  // TODO: shortest round-trip form
+  begin
+    Result := Digits[1];
+    if N > 1 then
+      Result := Result + '.' + Copy(Digits, 2, MaxInt);
+    Result := Result + 'e' + IntToStr(E);
+    if E > 0 then
+      Insert('+', Result, Pos('e', Result) + 1);
+  end;
+  Result := Sign + Result;
 end;
 
 function PromValidMetricName(const S: string): Boolean;

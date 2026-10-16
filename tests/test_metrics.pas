@@ -7,7 +7,7 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testregistry, prom_atomic, prom_metrics, prom_registry,
-  prom_exposition;
+  prom_exposition, Math;
 
 type
   TTestAtomic = class(TTestCase)
@@ -31,6 +31,7 @@ type
     procedure TestEscape;
     procedure TestNames;
     procedure TestCounterAndHistogramOutput;
+    procedure TestFormatFloat;
   end;
 
 implementation
@@ -84,6 +85,41 @@ procedure TTestExposition.TestEscape;
 begin
   AssertEquals('a\\b\"c\nd', PromEscapeLabelValue('a\b"c' + #10 + 'd'));
   AssertEquals('x\\y\nz', PromEscapeHelp('x\y' + #10 + 'z'));
+end;
+
+procedure TTestExposition.TestFormatFloat;
+const
+  Samples: array[0..7] of Double = (0.1, 0.5, 123456789.123456789, 1e-300,
+    1.7976931348623157e308, 5e-324, 2.5, -0.30000000000000004);
+var
+  I: Integer;
+  S: string;
+  Back, Third: Double;
+  FS: TFormatSettings;
+begin
+  FS := DefaultFormatSettings;
+  FS.DecimalSeparator := '.';
+  Third := 1.0;
+  Third := Third / 3.0;  // runtime: a folded constant would be Single precision
+  AssertEquals('0.3333333333333333', PromFormatFloat(Third));
+  AssertEquals('0', PromFormatFloat(0.0));
+  AssertEquals('100', PromFormatFloat(100.0));
+  AssertEquals('1e+21', PromFormatFloat(1e21));
+  AssertEquals('1e-8', PromFormatFloat(1e-8));
+  AssertEquals('0.00001', PromFormatFloat(1e-5));
+  AssertEquals('-1.5', PromFormatFloat(-1.5));
+  AssertEquals('0.1', PromFormatFloat(0.1));
+  AssertEquals('2.5', PromFormatFloat(2.5));
+  AssertEquals('1', PromFormatFloat(1.0));
+  AssertEquals('NaN', PromFormatFloat(NaN));
+  AssertEquals('+Inf', PromFormatFloat(Infinity));
+  AssertEquals('-Inf', PromFormatFloat(NegInfinity));
+  for I := Low(Samples) to High(Samples) do
+  begin
+    S := PromFormatFloat(Samples[I]);
+    AssertTrue('parse ' + S, TryStrToFloat(S, Back, FS));
+    AssertTrue('round-trip ' + S, Back = Samples[I]);
+  end;
 end;
 
 procedure TTestExposition.TestNames;
