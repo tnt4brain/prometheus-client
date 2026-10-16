@@ -63,9 +63,11 @@ type
     procedure FillQueues(Samples: TPromSamples);
     procedure CheckGolden(const FileName, Actual: string);
     procedure FillGoldenRegistry(R: TPromRegistry);
+    function GoldenText(AFormat: TPromFormat): string;
   published
     procedure TestFullExposition;
     procedure TestFullOpenMetrics;
+    procedure TestCreatedTimestamps;
     procedure TestEmptyRegistry;
     procedure TestNegotiate;
   end;
@@ -1322,30 +1324,90 @@ begin
   end;
 end;
 
-procedure TTestGolden.TestFullExposition;
+var
+  FakeEpochTicks: Integer;
+
+{ 1700000000, 1700000001, ...: every child created gets its own, reproducible timestamp. }
+function FakeEpoch: Double;
+begin
+  Result := 1700000000 + FakeEpochTicks;
+  FakeEpochTicks := FakeEpochTicks + 1;
+end;
+
+function TTestGolden.GoldenText(AFormat: TPromFormat): string;
 var
   R: TPromRegistry;
 begin
-  R := TPromRegistry.Create;
+  FakeEpochTicks := 0;
+  PromEpochClock := @FakeEpoch;
   try
-    FillGoldenRegistry(R);
-    CheckGolden('exposition.txt', R.Collect);
+    R := TPromRegistry.Create;
+    try
+      FillGoldenRegistry(R);
+      Result := R.Collect(AFormat);
+    finally
+      R.Free;
+    end;
   finally
-    R.Free;
+    PromEpochClock := nil;
   end;
 end;
 
-procedure TTestGolden.TestFullOpenMetrics;
+var
+  FixedEpoch: Double;
+
+function FixedEpochClock: Double;
+begin
+  Result := FixedEpoch;
+end;
+
+procedure TTestGolden.TestCreatedTimestamps;
 var
   R: TPromRegistry;
+  C: TPromCounter;
+  S: string;
 begin
-  R := TPromRegistry.Create;
+  PromEpochClock := @FixedEpochClock;
   try
-    FillGoldenRegistry(R);
-    CheckGolden('exposition_om.txt', R.Collect(pfOpenMetrics));
+    R := TPromRegistry.Create;
+    try
+      FixedEpoch := 1700000100.25;
+      C := R.Counter('jobs_total', 'Jobs.', ['kind']);
+      C.Labels(['a']).Inc;
+      FixedEpoch := 1700000200;
+      C.Labels(['b']).Inc;
+      S := R.Collect(pfOpenMetrics);
+      AssertTrue(S, Pos('jobs_created{kind="a"} 1700000100.25' + #10, S) > 0);
+      AssertTrue(S, Pos('jobs_created{kind="b"} 1700000200' + #10, S) > 0);
+      AssertTrue('no _created in text format', Pos('_created', R.Collect) = 0);
+      // a child recreated after Remove is a new series with a new creation time
+      FixedEpoch := 1700000300;
+      C.Remove(['a']);
+      C.Labels(['a']).Inc;
+      S := R.Collect(pfOpenMetrics);
+      AssertTrue(S, Pos('jobs_created{kind="a"} 1700000300' + #10, S) > 0);
+      // gauges and untyped metrics have none; SetToCurrentTime uses the same clock
+      FixedEpoch := 1700000400;
+      R.Gauge('last_run_seconds', 'x').SetToCurrentTime;
+      S := R.Collect(pfOpenMetrics);
+      AssertTrue(S, Pos('last_run_seconds 1700000400' + #10, S) > 0);
+      AssertTrue(S, Pos('last_run_seconds_created', S) = 0);
+    finally
+      R.Free;
+    end;
   finally
-    R.Free;
+    PromEpochClock := nil;
   end;
+end;
+
+procedure TTestGolden.TestFullExposition;
+begin
+  CheckGolden('exposition.txt', GoldenText(pfText));
+end;
+
+procedure TTestGolden.TestFullOpenMetrics;
+begin
+  CheckGolden('exposition_om.txt', GoldenText(pfOpenMetrics));
 end;
 
 procedure TTestGolden.TestEmptyRegistry;

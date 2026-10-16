@@ -22,7 +22,7 @@ Runtime-only package, FCL only (no LCL), so it works in console apps and service
 2. ~~Shortest round-trip float formatting~~ (done)
 3. ~~Process and FPC heap collectors~~ (done; tested on Windows x64 and Linux x86_64)
 4. ~~Optional bundled HTTP server unit~~ (done: `prom_server`, with Accept negotiation)
-5. ~~OpenMetrics 1.0 text output~~ (done; `_created` and exemplars still open)
+5. ~~OpenMetrics 1.0 text output~~ (done, incl. `_created`; exemplars still open)
 6. Summary quantiles, striped counters for extreme contention
 
 ## Provenance

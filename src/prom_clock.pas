@@ -10,12 +10,31 @@ interface
 { Seconds since an arbitrary fixed point; only differences are meaningful. }
 function PromMonotonicSeconds: Double;
 
+type
+  TPromEpochClock = function: Double;
+
+var
+  { Source of "created" timestamps and Gauge.SetToCurrentTime. Replace it to make
+    output deterministic (tests); assign nil to restore the system clock. }
+  PromEpochClock: TPromEpochClock = nil;
+
+{ Unix time in seconds (UTC) from PromEpochClock, or the system clock. }
+function PromEpochSeconds: Double;
+
 implementation
 
 uses
-  SysUtils
+  SysUtils, DateUtils
   {$IFDEF MSWINDOWS}, Windows{$ENDIF}
   {$IFDEF LINUX}, Linux, UnixType{$ENDIF};
+
+function PromEpochSeconds: Double;
+begin
+  if Assigned(PromEpochClock) then
+    Result := PromEpochClock()
+  else
+    Result := (LocalTimeToUniversal(Now) - UnixDateDelta) * SecsPerDay;
+end;
 
 {$IFDEF MSWINDOWS}
 var

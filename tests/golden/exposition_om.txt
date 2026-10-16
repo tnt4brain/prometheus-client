@@ -1,7 +1,9 @@
 # HELP http_requests Total requests.\nSecond line with \\ backslash and \"quotes\".
 # TYPE http_requests counter
 http_requests_total{method="GET",code="200"} 1027
+http_requests_created{method="GET",code="200"} 1700000001
 http_requests_total{method="POST",code="500"} 3
+http_requests_created{method="POST",code="500"} 1700000000
 # HELP temperature_celsius Plain gauge.
 # TYPE temperature_celsius gauge
 temperature_celsius -3.5
@@ -26,21 +28,25 @@ rpc_seconds_bucket{svc="a",le="1.0"} 3
 rpc_seconds_bucket{svc="a",le="+Inf"} 4
 rpc_seconds_sum{svc="a"} 3.05
 rpc_seconds_count{svc="a"} 4
+rpc_seconds_created{svc="a"} 1700000013
 rpc_seconds_bucket{svc="b",le="0.1"} 0
 rpc_seconds_bucket{svc="b",le="1.0"} 0
 rpc_seconds_bucket{svc="b",le="+Inf"} 0
 rpc_seconds_sum{svc="b"} 0
 rpc_seconds_count{svc="b"} 0
+rpc_seconds_created{svc="b"} 1700000014
 # HELP plain_seconds No labels.
 # TYPE plain_seconds histogram
 plain_seconds_bucket{le="0.5"} 1
 plain_seconds_bucket{le="+Inf"} 1
 plain_seconds_sum 0.25
 plain_seconds_count 1
+plain_seconds_created 1700000015
 # HELP payload_bytes Payload sizes.
 # TYPE payload_bytes summary
 payload_bytes_sum 350
 payload_bytes_count 2
+payload_bytes_created 1700000016
 # HELP legacy_value Untyped sample.
 # TYPE legacy_value unknown
 legacy_value 7
@@ -57,13 +63,17 @@ queue_depth{queue="sms"} 0.5
 # HELP capped Capped family.
 # TYPE capped counter
 capped_total{id="kept"} 1
+capped_created{id="kept"} 1700000019
 capped_total{id="__overflow__"} 5
+capped_created{id="__overflow__"} 1700000020
 # HELP removed Removed child.
 # TYPE removed counter
 removed_total{id="stays"} 4
+removed_created{id="stays"} 1700000022
 # HELP bare_events Counter without suffix.
 # TYPE bare_events counter
 bare_events_total 2
+bare_events_created 1700000023
 # HELP plain_callback Callback counter without suffix.
 # TYPE plain_callback counter
 plain_callback_total 12.5

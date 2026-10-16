@@ -40,8 +40,11 @@ type
   TPromChild = class
   private
     FPairs: string;   // preformatted, escaped: a="x",b="y"
+    FCreated: Double; // Unix seconds from PromEpochSeconds, set when the family makes the child
   protected
     procedure CollectSamples(W: TPromTextWriter; const MetricName: string); virtual; abstract;
+    { OpenMetrics only: the "<BaseName>_created" sample. }
+    procedure WriteCreated(W: TPromTextWriter; const BaseName: string);
   end;
 
   TPromFamily = class(TPromMetric)
@@ -58,6 +61,7 @@ type
     procedure SetMaxChildren(Value: Integer);
     function GetOverflowed: Boolean;
     function OverflowChild: TPromChild;   // caller holds the write lock
+    function NewChild: TPromChild;        // CreateChild + creation timestamp
   protected
     function CreateChild: TPromChild; virtual; abstract;
     function MetricType: string; virtual; abstract;
@@ -303,7 +307,7 @@ begin
   FChildren.OwnsObjects := True;
   FRetired := TList.Create;
   if Length(FLabelNames) = 0 then
-    FNoLabels := CreateChild;   // subclasses must be ready for this before inherited Create
+    FNoLabels := NewChild;   // subclasses must be ready for this before inherited Create
 end;
 
 destructor TPromFamily.Destroy;
@@ -350,6 +354,18 @@ begin
   finally
     FLock.EndRead;
   end;
+end;
+
+function TPromFamily.NewChild: TPromChild;
+begin
+  Result := CreateChild;
+  Result.FCreated := PromEpochSeconds;
+end;
+
+procedure TPromChild.WriteCreated(W: TPromTextWriter; const BaseName: string);
+begin
+  if W.Format = pfOpenMetrics then
+    W.WriteSample(BaseName + '_created', FPairs, FCreated);
 end;
 
 function TPromFamily.GetRetiredCount: Integer;
@@ -419,7 +435,7 @@ begin
     SetLength(Values, Length(FLabelNames));
     for I := 0 to High(Values) do
       Values[I] := PromOverflowLabelValue;
-    FOverflow := CreateChild;
+    FOverflow := NewChild;
     FOverflow.FPairs := PromFormatLabelPairs(FLabelNames, Values);
   end;
   Result := FOverflow;
@@ -465,7 +481,7 @@ begin
       Result := OverflowChild
     else
     begin
-      Result := CreateChild;
+      Result := NewChild;
       Result.FPairs := PromFormatLabelPairs(FLabelNames, Values);
       FChildren.AddObject(Key, Result);
     end;
@@ -522,6 +538,7 @@ end;
 procedure TPromCounterChild.CollectSamples(W: TPromTextWriter; const MetricName: string);
 begin
   W.WriteSample(MetricName, FPairs, Value);
+  WriteCreated(W, PromStripSuffix(MetricName, '_total'));
 end;
 
 function TPromCounter.CreateChild: TPromChild;
@@ -623,7 +640,7 @@ end;
 
 procedure TPromGaugeChild.SetToCurrentTime;
 begin
-  SetValue((LocalTimeToUniversal(Now) - UnixDateDelta) * SecsPerDay);
+  SetValue(PromEpochSeconds);
 end;
 
 function TPromGaugeChild.TrackInProgress: TPromInProgress;
@@ -678,6 +695,7 @@ begin
   W.WriteSample(MetricName + '_bucket', Sep + 'le="+Inf"', Cum);
   W.WriteSample(MetricName + '_sum', FPairs, AtomicLoadDouble(FSumBits));
   W.WriteSample(MetricName + '_count', FPairs, Cum);
+  WriteCreated(W, MetricName);
 end;
 
 constructor TPromHistogram.Create(const AName, AHelp: string;
@@ -736,6 +754,7 @@ procedure TPromSummaryChild.CollectSamples(W: TPromTextWriter; const MetricName:
 begin
   W.WriteSample(MetricName + '_sum', FPairs, AtomicLoadDouble(FSumBits));
   W.WriteSample(MetricName + '_count', FPairs, AtomicLoadInt64(FCount));
+  WriteCreated(W, MetricName);
 end;
 
 constructor TPromSummary.Create(const AName, AHelp: string; const ALabelNames: array of string);

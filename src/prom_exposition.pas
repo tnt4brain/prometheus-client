@@ -20,6 +20,8 @@ type
 function PromEscapeLabelValue(const S: string): string;
 function PromEscapeHelp(const S: string): string;
 function PromFormatFloat(V: Double): string;
+{ Name without Suffix when it ends with it (and is longer), else Name unchanged. }
+function PromStripSuffix(const Name, Suffix: string): string;
 function PromValidMetricName(const S: string): Boolean;
 function PromValidLabelName(const S: string): Boolean;
 { a="x",b="y" with values escaped; Names and Values must have equal length. }
@@ -170,7 +172,7 @@ begin
   FOut := TStringStream.Create('');
 end;
 
-function StripSuffix(const Name, Suffix: string): string;
+function PromStripSuffix(const Name, Suffix: string): string;
 begin
   Result := Name;
   if (Length(Name) > Length(Suffix)) and
@@ -181,7 +183,7 @@ end;
 function TPromTextWriter.SampleName(const MetricType, Name: string): string;
 begin
   if (FFormat = pfOpenMetrics) and (MetricType = 'counter') then
-    Result := StripSuffix(Name, '_total') + '_total'
+    Result := PromStripSuffix(Name, '_total') + '_total'
   else
     Result := Name;
 end;
@@ -209,9 +211,9 @@ begin
   if FFormat = pfOpenMetrics then
   begin
     if T = 'counter' then
-      N := StripSuffix(N, '_total')
+      N := PromStripSuffix(N, '_total')
     else if T = 'info' then
-      N := StripSuffix(N, '_info')
+      N := PromStripSuffix(N, '_info')
     else if T = 'untyped' then
       T := 'unknown';
     H := PromEscapeLabelValue(Help);   // OpenMetrics HELP also escapes quotes
