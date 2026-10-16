@@ -67,3 +67,14 @@ bare_events 2
 # HELP plain_callback Callback counter without suffix.
 # TYPE plain_callback counter
 plain_callback 12.5
+# HELP exemplar_requests_total Counter with an exemplar.
+# TYPE exemplar_requests_total counter
+exemplar_requests_total{route="/home"} 3
+exemplar_requests_total{route="/about"} 1
+# HELP exemplar_seconds Histogram with exemplars.
+# TYPE exemplar_seconds histogram
+exemplar_seconds_bucket{le="0.1"} 2
+exemplar_seconds_bucket{le="1"} 2
+exemplar_seconds_bucket{le="+Inf"} 3
+exemplar_seconds_sum 2.1199999999999997
+exemplar_seconds_count 3

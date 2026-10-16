@@ -77,4 +77,18 @@ bare_events_created 1700000023
 # HELP plain_callback Callback counter without suffix.
 # TYPE plain_callback counter
 plain_callback_total 12.5
+# HELP exemplar_requests Counter with an exemplar.
+# TYPE exemplar_requests counter
+exemplar_requests_total{route="/home"} 3 # {trace_id="abc123"} 3 1700000025
+exemplar_requests_created{route="/home"} 1700000024
+exemplar_requests_total{route="/about"} 1
+exemplar_requests_created{route="/about"} 1700000026
+# HELP exemplar_seconds Histogram with exemplars.
+# TYPE exemplar_seconds histogram
+exemplar_seconds_bucket{le="0.1"} 2 # {trace_id="faster"} 0.07 1700000030
+exemplar_seconds_bucket{le="1.0"} 2
+exemplar_seconds_bucket{le="+Inf"} 3 # {trace_id="slow",user="café"} 2 1700000029
+exemplar_seconds_sum 2.1199999999999997
+exemplar_seconds_count 3
+exemplar_seconds_created 1700000027
 # EOF

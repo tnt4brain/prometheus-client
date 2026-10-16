@@ -17,6 +17,20 @@ const
 type
   TPromFormat = (pfText, pfOpenMetrics);
 
+  { An OpenMetrics exemplar: a sample plus the labels (e.g. trace_id) of one concrete
+    observation. Pairs is preformatted and escaped; HasValue = False means "none". }
+  TPromExemplar = record
+    HasValue: Boolean;
+    Pairs: string;
+    Value: Double;
+    Timestamp: Double;   // Unix seconds
+  end;
+
+const
+  PromNoExemplar: TPromExemplar = (HasValue: False; Pairs: ''; Value: 0; Timestamp: 0);
+  { Limit on the combined length of exemplar label names and values, in UTF-8 code points. }
+  PromMaxExemplarRunes = 128;
+
 function PromEscapeLabelValue(const S: string): string;
 function PromEscapeHelp(const S: string): string;
 function PromFormatFloat(V: Double): string;
@@ -26,6 +40,10 @@ function PromValidMetricName(const S: string): Boolean;
 function PromValidLabelName(const S: string): Boolean;
 { a="x",b="y" with values escaped; Names and Values must have equal length. }
 function PromFormatLabelPairs(const Names, Values: array of string): string;
+{ Builds an exemplar from alternating name, value strings (['trace_id', 'abc']). Raises
+  EArgumentException for an odd count, an invalid label name, or more than
+  PromMaxExemplarRunes UTF-8 code points in all names and values together. }
+function PromMakeExemplar(const NameValuePairs: array of string; Value, Timestamp: Double): TPromExemplar;
 
 type
   { MetricType is the logical type: counter, gauge, histogram, summary, untyped or info.
@@ -46,7 +64,10 @@ type
     { Text of a histogram "le" label value: OpenMetrics wants a float, 1 becomes 1.0. }
     function FormatLe(V: Double): string;
     { LabelPairs is already formatted, e.g. method="GET",code="200"; may be empty. }
-    procedure WriteSample(const Name, LabelPairs: string; Value: Double);
+    procedure WriteSample(const Name, LabelPairs: string; Value: Double); overload;
+    { Same, followed by the exemplar in OpenMetrics (ignored in the text format). }
+    procedure WriteSample(const Name, LabelPairs: string; Value: Double;
+      const Exemplar: TPromExemplar); overload;
     { Terminates the document (# EOF in OpenMetrics, nothing in text format). }
     procedure Finish;
     function Text: string;
@@ -163,6 +184,43 @@ begin
   end;
 end;
 
+function Utf8Length(const S: string): Integer;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := 1 to Length(S) do
+    if (Ord(S[I]) and $C0) <> $80 then   // continuation bytes do not start a code point
+      Result := Result + 1;
+end;
+
+function PromMakeExemplar(const NameValuePairs: array of string; Value, Timestamp: Double): TPromExemplar;
+var
+  I, Runes: Integer;
+  Names, Values: array of string;
+begin
+  if Odd(Length(NameValuePairs)) then
+    raise EArgumentException.Create('Exemplar labels must be name, value pairs');
+  SetLength(Names, Length(NameValuePairs) div 2);
+  SetLength(Values, Length(Names));
+  Runes := 0;
+  for I := 0 to High(Names) do
+  begin
+    Names[I] := NameValuePairs[2 * I];
+    Values[I] := NameValuePairs[2 * I + 1];
+    if not PromValidLabelName(Names[I]) then
+      raise EArgumentException.CreateFmt('Invalid exemplar label name "%s"', [Names[I]]);
+    Runes := Runes + Utf8Length(Names[I]) + Utf8Length(Values[I]);
+  end;
+  if Runes > PromMaxExemplarRunes then
+    raise EArgumentException.CreateFmt('Exemplar labels exceed %d characters (%d)',
+      [PromMaxExemplarRunes, Runes]);
+  Result.HasValue := True;
+  Result.Pairs := PromFormatLabelPairs(Names, Values);
+  Result.Value := Value;
+  Result.Timestamp := Timestamp;
+end;
+
 { TPromTextWriter }
 
 constructor TPromTextWriter.Create(AFormat: TPromFormat);
@@ -227,6 +285,24 @@ begin
   if Help <> '' then
     FOut.WriteString('# HELP ' + N + ' ' + H + #10);
   FOut.WriteString('# TYPE ' + N + ' ' + T + #10);
+end;
+
+procedure TPromTextWriter.WriteSample(const Name, LabelPairs: string; Value: Double;
+  const Exemplar: TPromExemplar);
+var
+  Line: string;
+begin
+  if (FFormat <> pfOpenMetrics) or not Exemplar.HasValue then
+  begin
+    WriteSample(Name, LabelPairs, Value);
+    Exit;
+  end;
+  if LabelPairs = '' then
+    Line := Name + ' ' + PromFormatFloat(Value)
+  else
+    Line := Name + '{' + LabelPairs + '} ' + PromFormatFloat(Value);
+  FOut.WriteString(Line + ' # {' + Exemplar.Pairs + '} ' + PromFormatFloat(Exemplar.Value) +
+    ' ' + PromFormatFloat(Exemplar.Timestamp) + #10);
 end;
 
 procedure TPromTextWriter.Finish;

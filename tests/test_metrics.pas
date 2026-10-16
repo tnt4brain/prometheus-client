@@ -72,6 +72,14 @@ type
     procedure TestNegotiate;
   end;
 
+  TTestExemplars = class(TTestCase)
+  published
+    procedure TestValidation;
+    procedure TestCounterExemplar;
+    procedure TestHistogramExemplarBuckets;
+    procedure TestConcurrentRecordAndScrape;
+  end;
+
   TTestServer = class(TTestCase)
   published
     procedure TestServeMetrics;
@@ -1321,6 +1329,15 @@ begin
     R.Counter('bare_events', 'Counter without suffix.').Inc(2);
     R.Register(TPromCallbackMetric.Create('plain_callback', 'Callback counter without suffix.',
       'counter', @FakeCpuSeconds));
+
+    // exemplars come last so that the fake clock ticks and all series above stay unchanged
+    C := R.Counter('exemplar_requests_total', 'Counter with an exemplar.', ['route']);
+    C.Labels(['/home']).IncWithExemplar(3, ['trace_id', 'abc123']);
+    C.Labels(['/about']).Inc;
+    H := R.Histogram('exemplar_seconds', 'Histogram with exemplars.', [0.1, 1]);
+    H.ObserveWithExemplar(0.05, ['trace_id', 'fast']);
+    H.ObserveWithExemplar(2, ['trace_id', 'slow', 'user', 'caf' + #$C3#$A9]);
+    H.ObserveWithExemplar(0.07, ['trace_id', 'faster']);   // replaces "fast" in the first bucket
   end;
 end;
 
@@ -1447,6 +1464,230 @@ begin
   AssertTrue('junk', PromNegotiateFormat('application/json;q=1') = pfText);
 end;
 
+procedure TTestExemplars.TestValidation;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  Ex: TPromExemplar;
+
+  function Rep(const S: string; N: Integer): string;
+  var
+    K: Integer;
+  begin
+    Result := '';
+    for K := 1 to N do
+      Result := Result + S;
+  end;
+
+  procedure Rejects(const Labels: array of string; const What: string);
+  var
+    Raised: Boolean;
+    Before: Double;
+  begin
+    Raised := False;
+    Before := C.Value;
+    try
+      C.IncWithExemplar(1, Labels);
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue(What + ': rejected', Raised);
+    AssertEquals(What + ': counter untouched', Before, C.Value, 0);
+  end;
+
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('v_total', 'x');
+    Rejects(['trace_id'], 'odd count');
+    Rejects(['1bad', 'x'], 'bad label name');
+    Rejects(['__reserved', 'x'], 'reserved label name');
+    // exactly 128 characters of names + values is fine, 129 is not
+    Ex := PromMakeExemplar(['a', StringOfChar('x', 127)], 1, 0);
+    AssertTrue(Ex.HasValue);
+    Rejects(['a', StringOfChar('x', 128)], '129 characters');
+    Ex := PromMakeExemplar(['a', StringOfChar('x', 27), 'b', #$C3#$A9 + #$C3#$A9], 1, 0);
+    AssertEquals('a="' + StringOfChar('x', 27) + '",b="' + #$C3#$A9 + #$C3#$A9 + '"', Ex.Pairs);
+    // code points, not bytes: 'a' + 127 two-byte characters is 128 characters (255 bytes)
+    C.IncWithExemplar(1, ['a', Rep(#$C3#$A9, 127)]);
+    AssertEquals(1, C.Value, 0);
+    Rejects(['a', Rep(#$C3#$A9, 128)], 'multibyte, 129 characters');
+    // empty exemplar label set is allowed
+    C.IncWithExemplar(2, []);
+    AssertEquals(3, C.Value, 0);
+    // negative delta still rejected, before anything else
+    try
+      C.IncWithExemplar(-1, ['a', 'b']);
+      Fail('negative delta accepted');
+    except
+      on EArgumentException do ;
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestExemplars.TestCounterExemplar;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  S: string;
+begin
+  PromEpochClock := @FixedEpochClock;
+  try
+    FixedEpoch := 1700000000.5;
+    R := TPromRegistry.Create;
+    try
+      C := R.Counter('hits_total', 'Hits.');
+      C.IncWithExemplar(2, ['trace_id', 'one']);
+      S := R.Collect(pfOpenMetrics);
+      AssertTrue(S, Pos('hits_total 2 # {trace_id="one"} 2 1700000000.5' + #10, S) > 0);
+      AssertTrue('text format has no exemplar', Pos(' # ', R.Collect) = 0);
+      FixedEpoch := 1700000001;
+      C.IncWithExemplar(1, ['trace_id', 'two']);   // latest wins
+      S := R.Collect(pfOpenMetrics);
+      AssertTrue(S, Pos('hits_total 3 # {trace_id="two"} 1 1700000001' + #10, S) > 0);
+      C.Inc;   // plain Inc keeps the last exemplar
+      S := R.Collect(pfOpenMetrics);
+      AssertTrue(S, Pos('hits_total 4 # {trace_id="two"} 1 1700000001' + #10, S) > 0);
+      // an empty label set renders as {}
+      C.IncWithExemplar(1, []);
+      S := R.Collect(pfOpenMetrics);
+      AssertTrue(S, Pos('hits_total 5 # {} 1 1700000001' + #10, S) > 0);
+    finally
+      R.Free;
+    end;
+  finally
+    PromEpochClock := nil;
+  end;
+end;
+
+procedure TTestExemplars.TestHistogramExemplarBuckets;
+var
+  R: TPromRegistry;
+  H: TPromHistogram;
+  S: string;
+begin
+  PromEpochClock := @FixedEpochClock;
+  try
+    FixedEpoch := 1700000000;
+    R := TPromRegistry.Create;
+    try
+      H := R.Histogram('lat_seconds', 'x', [0.1, 1]);
+      H.ObserveWithExemplar(0.1, ['t', 'edge']);    // on the bound: belongs to le=0.1
+      H.ObserveWithExemplar(5, ['t', 'inf']);       // beyond all bounds: +Inf
+      S := R.Collect(pfOpenMetrics);
+      AssertTrue(S, Pos('lat_seconds_bucket{le="0.1"} 1 # {t="edge"} 0.1 1700000000' + #10, S) > 0);
+      AssertTrue(S, Pos('lat_seconds_bucket{le="1.0"} 1' + #10, S) > 0);   // no exemplar here
+      AssertTrue(S, Pos('lat_seconds_bucket{le="+Inf"} 2 # {t="inf"} 5 1700000000' + #10, S) > 0);
+      AssertTrue(S, Pos('lat_seconds_count 2' + #10, S) > 0);
+      AssertTrue(S, Pos('lat_seconds_sum 5.1' + #10, S) > 0);
+      // plain Observe goes to the same bucket as ObserveWithExemplar
+      H.Observe(0.1);
+      S := R.Collect(pfOpenMetrics);
+      AssertTrue(S, Pos('lat_seconds_bucket{le="0.1"} 2 # {t="edge"}', S) > 0);
+      AssertTrue('text format has no exemplar', Pos(' # ', R.Collect) = 0);
+      // a rejected exemplar records nothing
+      try
+        H.ObserveWithExemplar(0.5, ['t']);
+        Fail('odd label count accepted');
+      except
+        on EArgumentException do ;
+      end;
+      AssertTrue(R.Collect(pfOpenMetrics), Pos('lat_seconds_count 3' + #10, R.Collect(pfOpenMetrics)) > 0);
+    finally
+      R.Free;
+    end;
+  finally
+    PromEpochClock := nil;
+  end;
+end;
+
+type
+  TExemplarThread = class(TThread)
+  private
+    FCounter: TPromCounter;
+    FHist: TPromHistogram;
+    FId: Integer;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(ACounter: TPromCounter; AHist: TPromHistogram; AId: Integer);
+  end;
+
+constructor TExemplarThread.Create(ACounter: TPromCounter; AHist: TPromHistogram; AId: Integer);
+begin
+  FCounter := ACounter;
+  FHist := AHist;
+  FId := AId;
+  inherited Create(False);
+end;
+
+procedure TExemplarThread.Execute;
+var
+  I: Integer;
+  Id: string;
+begin
+  Id := 'w' + IntToStr(FId);
+  for I := 0 to 19999 do
+  begin
+    FCounter.IncWithExemplar(1, ['trace_id', Id, 'seq', IntToStr(I)]);
+    FHist.ObserveWithExemplar((I mod 3) * 0.5, ['trace_id', Id]);
+  end;
+end;
+
+procedure TTestExemplars.TestConcurrentRecordAndScrape;
+const
+  Workers = 4;
+  Iter = 20000;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  H: TPromHistogram;
+  T: array[0..Workers - 1] of TExemplarThread;
+  I, P, Q, Scrapes, Seen: Integer;
+  S, Id: string;
+  Done: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('conc_total', 'x');
+    H := R.Histogram('conc_seconds', 'x', [0.4, 0.9]);
+    for I := 0 to Workers - 1 do
+      T[I] := TExemplarThread.Create(C, H, I);
+    Scrapes := 0;
+    Seen := 0;
+    repeat
+      Done := True;
+      for I := 0 to Workers - 1 do
+        if not T[I].Finished then Done := False;
+      S := R.Collect(pfOpenMetrics);
+      Inc(Scrapes);
+      // every exemplar seen must be one that some worker really wrote, never a torn mix
+      P := Pos('{trace_id="', S);
+      while P > 0 do
+      begin
+        Q := Pos('"', S, P + 11);
+        Id := Copy(S, P + 11, Q - P - 11);
+        AssertTrue('exemplar trace id: ' + Id, (Id = 'w0') or (Id = 'w1') or (Id = 'w2') or (Id = 'w3'));
+        Inc(Seen);
+        P := Pos('{trace_id="', S, Q);
+      end;
+    until Done;
+    for I := 0 to Workers - 1 do
+    begin
+      T[I].WaitFor;
+      T[I].Free;
+    end;
+    AssertTrue('scraped while recording', Scrapes > 1);
+    S := R.Collect(pfOpenMetrics);
+    AssertTrue(S, Pos('conc_total ' + IntToStr(Workers * Iter) + ' # {trace_id="w', S) > 0);
+    AssertTrue(S, Pos('conc_seconds_count ' + IntToStr(Workers * Iter) + #10, S) > 0);
+  finally
+    R.Free;
+  end;
+end;
+
 procedure TTestServer.TestServeMetrics;
 const
   TestPort = 19187;
@@ -1508,6 +1749,7 @@ end;
 
 initialization
   RegisterTest(TTestGolden);
+  RegisterTest(TTestExemplars);
   RegisterTest(TTestServer);
   RegisterTest(TTestStress);
   RegisterTest(TTestAtomic);

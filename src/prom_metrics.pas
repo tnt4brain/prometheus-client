@@ -18,7 +18,7 @@ unit prom_metrics;
 interface
 
 uses
-  SysUtils, Classes, DateUtils, prom_atomic, prom_exposition, prom_clock;
+  SysUtils, Classes, SyncObjs, DateUtils, prom_atomic, prom_exposition, prom_clock;
 
 const
   { Label value used on the shared child that absorbs combinations over MaxChildren. }
@@ -41,6 +41,7 @@ type
   private
     FPairs: string;   // preformatted, escaped: a="x",b="y"
     FCreated: Double; // Unix seconds from PromEpochSeconds, set when the family makes the child
+    FExLock: TCriticalSection;   // the family's exemplar lock (not owned); guards exemplar slots
   protected
     procedure CollectSamples(W: TPromTextWriter; const MetricName: string); virtual; abstract;
     { OpenMetrics only: the "<BaseName>_created" sample. }
@@ -56,6 +57,7 @@ type
     FMaxChildren: Integer;       // 0 = unlimited; guarded by FLock
     FOverflow: TPromChild;       // shared child for combinations beyond the cap
     FRetired: TList;             // removed children, owned, freed only in Destroy
+    FExLock: TCriticalSection;   // shared by the children; only exemplar recording/scraping take it
     function GetRetiredCount: Integer;
     function MakeKey(const Values: array of string): string;
     procedure SetMaxChildren(Value: Integer);
@@ -94,10 +96,16 @@ type
   TPromCounterChild = class(TPromChild)
   private
     FBits: Int64;
+    FExemplar: TPromExemplar;   // latest exemplar; guarded by FExLock
   protected
     procedure CollectSamples(W: TPromTextWriter; const MetricName: string); override;
   public
     procedure Inc(Delta: Double = 1);
+    { Inc plus an exemplar (alternating label name, value: ['trace_id', 'abc']) that is
+      shown on the _total sample in OpenMetrics output. The exemplar is validated first:
+      if it is rejected (EArgumentException) the counter is not incremented. The latest
+      exemplar replaces the previous one. Takes a short lock; plain Inc stays lock-free. }
+    procedure IncWithExemplar(Delta: Double; const ExemplarLabels: array of string);
     function Value: Double;
   end;
 
@@ -109,6 +117,7 @@ type
     function Labels(const Values: array of string): TPromCounterChild;
     { Shortcuts for a family without labels. }
     procedure Inc(Delta: Double = 1);
+    procedure IncWithExemplar(Delta: Double; const ExemplarLabels: array of string);
     function Value: Double;
   end;
 
@@ -196,11 +205,17 @@ type
     FOwner: TPromHistogram;
     FCounts: array of Int64;   // per bucket (not cumulative); last = +Inf
     FSumBits: Int64;
+    FExemplars: array of TPromExemplar;   // one per bucket incl. +Inf, allocated on first use
+    function BucketIndex(V: Double): Integer;
   protected
     procedure CollectSamples(W: TPromTextWriter; const MetricName: string); override;
   public
     constructor Create(AOwner: TPromHistogram);
     procedure Observe(V: Double); override;
+    { Observe plus an exemplar stored in the bucket V falls into (latest per bucket wins)
+      and shown on that bucket's sample in OpenMetrics output. Validated before anything
+      is recorded. See TPromCounterChild.IncWithExemplar. }
+    procedure ObserveWithExemplar(V: Double; const ExemplarLabels: array of string);
   end;
 
   TPromHistogram = class(TPromFamily)
@@ -214,6 +229,7 @@ type
       const Buckets: array of Double);
     function Labels(const Values: array of string): TPromHistogramChild;
     procedure Observe(V: Double);
+    procedure ObserveWithExemplar(V: Double; const ExemplarLabels: array of string);
     function StartTimer: TPromTimer;
   end;
 
@@ -306,6 +322,7 @@ begin
   FChildren.Sorted := True;
   FChildren.OwnsObjects := True;
   FRetired := TList.Create;
+  FExLock := TCriticalSection.Create;
   if Length(FLabelNames) = 0 then
     FNoLabels := NewChild;   // subclasses must be ready for this before inherited Create
 end;
@@ -322,6 +339,7 @@ begin
   FOverflow.Free;
   FChildren.Free;
   FLock.Free;
+  FExLock.Free;   // last: children reference it
   inherited Destroy;
 end;
 
@@ -360,6 +378,7 @@ function TPromFamily.NewChild: TPromChild;
 begin
   Result := CreateChild;
   Result.FCreated := PromEpochSeconds;
+  Result.FExLock := FExLock;
 end;
 
 procedure TPromChild.WriteCreated(W: TPromTextWriter; const BaseName: string);
@@ -535,9 +554,38 @@ begin
   Result := AtomicLoadDouble(FBits);
 end;
 
-procedure TPromCounterChild.CollectSamples(W: TPromTextWriter; const MetricName: string);
+procedure TPromCounterChild.IncWithExemplar(Delta: Double; const ExemplarLabels: array of string);
+var
+  Ex: TPromExemplar;
 begin
-  W.WriteSample(MetricName, FPairs, Value);
+  if Delta < 0 then
+    raise EArgumentException.Create('Counter cannot decrease');
+  // validate and format before touching anything, so a rejected exemplar changes nothing
+  Ex := PromMakeExemplar(ExemplarLabels, Delta, PromEpochSeconds);
+  AtomicAddDouble(FBits, Delta);
+  FExLock.Enter;
+  try
+    FExemplar := Ex;
+  finally
+    FExLock.Leave;
+  end;
+end;
+
+procedure TPromCounterChild.CollectSamples(W: TPromTextWriter; const MetricName: string);
+var
+  Ex: TPromExemplar;
+begin
+  Ex := PromNoExemplar;
+  if W.Format = pfOpenMetrics then
+  begin
+    FExLock.Enter;
+    try
+      Ex := FExemplar;
+    finally
+      FExLock.Leave;
+    end;
+  end;
+  W.WriteSample(MetricName, FPairs, Value, Ex);
   WriteCreated(W, PromStripSuffix(MetricName, '_total'));
 end;
 
@@ -559,6 +607,11 @@ end;
 procedure TPromCounter.Inc(Delta: Double);
 begin
   TPromCounterChild(NoLabelChild).Inc(Delta);
+end;
+
+procedure TPromCounter.IncWithExemplar(Delta: Double; const ExemplarLabels: array of string);
+begin
+  TPromCounterChild(NoLabelChild).IncWithExemplar(Delta, ExemplarLabels);
 end;
 
 function TPromCounter.Value: Double;
@@ -663,7 +716,9 @@ begin
   SetLength(FCounts, Length(AOwner.FUpper) + 1);
 end;
 
-procedure TPromHistogramChild.Observe(V: Double);
+{ Index of the bucket V belongs to (the last one is +Inf). Shared by Observe and
+  ObserveWithExemplar so they can never disagree. }
+function TPromHistogramChild.BucketIndex(V: Double): Integer;
 var
   Lo, Hi, Mid: Integer;
 begin
@@ -674,8 +729,32 @@ begin
     Mid := (Lo + Hi) div 2;
     if V <= FOwner.FUpper[Mid] then Hi := Mid else Lo := Mid + 1;
   end;
-  AtomicAddInt64(FCounts[Lo], 1);
+  Result := Lo;
+end;
+
+procedure TPromHistogramChild.Observe(V: Double);
+begin
+  AtomicAddInt64(FCounts[BucketIndex(V)], 1);
   AtomicAddDouble(FSumBits, V);
+end;
+
+procedure TPromHistogramChild.ObserveWithExemplar(V: Double; const ExemplarLabels: array of string);
+var
+  Ex: TPromExemplar;
+  Idx: Integer;
+begin
+  Ex := PromMakeExemplar(ExemplarLabels, V, PromEpochSeconds);
+  Idx := BucketIndex(V);
+  AtomicAddInt64(FCounts[Idx], 1);
+  AtomicAddDouble(FSumBits, V);
+  FExLock.Enter;
+  try
+    if Length(FExemplars) = 0 then
+      SetLength(FExemplars, Length(FCounts));
+    FExemplars[Idx] := Ex;
+  finally
+    FExLock.Leave;
+  end;
 end;
 
 procedure TPromHistogramChild.CollectSamples(W: TPromTextWriter; const MetricName: string);
@@ -683,16 +762,32 @@ var
   I: Integer;
   Cum: Int64;
   Sep: string;
+  Exs: array of TPromExemplar;
 begin
+  if W.Format = pfOpenMetrics then
+  begin
+    FExLock.Enter;
+    try
+      Exs := Copy(FExemplars);   // snapshot; written out after the lock is released
+    finally
+      FExLock.Leave;
+    end;
+  end;
   if FPairs = '' then Sep := '' else Sep := FPairs + ',';
   Cum := 0;
   for I := 0 to High(FOwner.FUpper) do
   begin
     Cum := Cum + AtomicLoadInt64(FCounts[I]);
-    W.WriteSample(MetricName + '_bucket', Sep + 'le="' + W.FormatLe(FOwner.FUpper[I]) + '"', Cum);
+    if I < Length(Exs) then
+      W.WriteSample(MetricName + '_bucket', Sep + 'le="' + W.FormatLe(FOwner.FUpper[I]) + '"', Cum, Exs[I])
+    else
+      W.WriteSample(MetricName + '_bucket', Sep + 'le="' + W.FormatLe(FOwner.FUpper[I]) + '"', Cum);
   end;
   Cum := Cum + AtomicLoadInt64(FCounts[High(FCounts)]);
-  W.WriteSample(MetricName + '_bucket', Sep + 'le="+Inf"', Cum);
+  if Length(Exs) > 0 then
+    W.WriteSample(MetricName + '_bucket', Sep + 'le="+Inf"', Cum, Exs[High(Exs)])
+  else
+    W.WriteSample(MetricName + '_bucket', Sep + 'le="+Inf"', Cum);
   W.WriteSample(MetricName + '_sum', FPairs, AtomicLoadDouble(FSumBits));
   W.WriteSample(MetricName + '_count', FPairs, Cum);
   WriteCreated(W, MetricName);
@@ -735,6 +830,11 @@ end;
 procedure TPromHistogram.Observe(V: Double);
 begin
   TPromHistogramChild(NoLabelChild).Observe(V);
+end;
+
+procedure TPromHistogram.ObserveWithExemplar(V: Double; const ExemplarLabels: array of string);
+begin
+  TPromHistogramChild(NoLabelChild).ObserveWithExemplar(V, ExemplarLabels);
 end;
 
 function TPromHistogram.StartTimer: TPromTimer;
