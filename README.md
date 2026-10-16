@@ -35,7 +35,15 @@ begin
   Write(DefaultRegistry.Collect(pfOpenMetrics));       // OpenMetrics 1.0
 end.
 ```
-Cache `Labels(...)` results in hot paths. Quantiles are windowed (10 min) estimates with 1% relative error.
+Cache `Labels(...)` results in hot paths. That pointer stays valid until the family is freed, so removed series are
+kept in memory. If label sets come and go (per-connection, per-job), use `Acquire` / `Release` instead and
+`Remove` frees the series once nobody holds it:
+```pascal
+Ch := TPromCounterChild(Jobs.Acquire([JobId]));
+try Ch.Inc; finally Jobs.Release(Ch); end;
+Jobs.Remove([JobId]);        // freed now, or at the last Release + next Remove/Clear/new series/Reclaim
+```
+ Quantiles are windowed (10 min) estimates with 1% relative error.
 
 ## Roadmap
 1. ~~Labelled children~~ (done: `Labels(...)`, RW-locked lookup, cached children, `Remove`/`Clear`, `MaxChildren` cap)

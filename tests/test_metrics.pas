@@ -2823,7 +2823,278 @@ begin
   end;
 end;
 
+{ Acquire / Release }
+
+type
+  TTestAcquire = class(TTestCase)
+  published
+    procedure TestHeldChildSurvivesRemoveUntilRelease;
+    procedure TestLabelsPinsTheChild;
+    procedure TestUnheldChildIsFreedByRemove;
+    procedure TestCreateSweeps;
+    procedure TestClearAndOverflow;
+    procedure TestReleaseMisuse;
+    procedure TestNoLabelFamily;
+    procedure TestConcurrentChurn;
+  end;
+
+  TAcquireThread = class(TThread)
+  private
+    FFamily: TPromCounter;
+    FSeed: Integer;
+    FFailed: Boolean;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AFamily: TPromCounter; ASeed: Integer);
+    property Failed: Boolean read FFailed;
+  end;
+
+constructor TAcquireThread.Create(AFamily: TPromCounter; ASeed: Integer);
+begin
+  FFamily := AFamily;
+  FSeed := ASeed;
+  inherited Create(False);
+end;
+
+procedure TAcquireThread.Execute;
+var
+  I, K: Integer;
+  Ch: TPromCounterChild;
+  Before: Double;
+begin
+  try
+    RandSeed := FSeed;
+    for I := 1 to 20000 do
+    begin
+      K := Random(6);
+      case Random(4) of
+        0:
+          FFamily.Remove([IntToStr(K)]);
+        1:
+          if Random(50) = 0 then FFamily.Clear;
+        2:
+          FFamily.Reclaim;
+      else
+        begin
+          Ch := TPromCounterChild(FFamily.Acquire([IntToStr(K)]));
+          try
+            Before := Ch.Value;   // would crash or garble if the child had been freed
+            Ch.Inc;
+            if Ch.Value < Before + 1 then
+              FFailed := True;
+          finally
+            FFamily.Release(Ch);
+          end;
+        end;
+      end;
+    end;
+  except
+    FFailed := True;
+  end;
+end;
+
+procedure TTestAcquire.TestHeldChildSurvivesRemoveUntilRelease;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  Ch: TPromCounterChild;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('held_total', 'x', ['k']);
+    Ch := TPromCounterChild(C.Acquire(['a']));
+    Ch.Inc(2);
+    AssertTrue('removed', C.Remove(['a']));
+    AssertEquals('kept while held', 1, C.RetiredCount);
+    Ch.Inc;   // still valid, just no longer exposed
+    AssertEquals(3, Ch.Value, 0);
+    AssertTrue('gone from the exposition', Pos('held_total{', R.Collect) = 0);
+    AssertEquals('nothing to free yet', 0, C.Reclaim);
+    C.Release(Ch);
+    AssertEquals('freed after release', 1, C.Reclaim);
+    AssertEquals(0, C.RetiredCount);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestAcquire.TestLabelsPinsTheChild;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  Cached, Ch: TPromCounterChild;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('pin_total', 'x', ['k']);
+    Cached := C.Labels(['p']);          // uncounted pointer, may be cached by the caller
+    Ch := TPromCounterChild(C.Acquire(['p']));
+    AssertTrue('same child', Cached = Ch);
+    C.Remove(['p']);
+    C.Release(Ch);
+    AssertEquals('pinned child is never freed', 0, C.Reclaim);
+    AssertEquals(1, C.RetiredCount);
+    Cached.Inc;   // the cached pointer is still safe
+    AssertEquals(1, Cached.Value, 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestAcquire.TestUnheldChildIsFreedByRemove;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('free_total', 'x', ['k']);
+    C.Release(C.Acquire(['a']));
+    AssertTrue(C.Remove(['a']));
+    AssertEquals('freed straight away', 0, C.RetiredCount);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestAcquire.TestCreateSweeps;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  Ch: TPromChild;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('sweep_total', 'x', ['k']);
+    Ch := C.Acquire(['a']);
+    C.Remove(['a']);
+    AssertEquals(1, C.RetiredCount);
+    C.Release(Ch);
+    AssertEquals('still waiting for a sweep', 1, C.RetiredCount);
+    C.Labels(['b']);   // creating a child sweeps
+    AssertEquals(0, C.RetiredCount);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestAcquire.TestClearAndOverflow;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  A, O: TPromChild;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('clr_total', 'x', ['k']);
+    C.MaxChildren := 1;
+    A := C.Acquire(['a']);
+    O := C.Acquire(['b']);    // over the cap: the shared overflow child
+    AssertTrue('overflow is another child', A <> O);
+    C.Clear;
+    AssertEquals('both held', 2, C.RetiredCount);
+    C.Release(A);
+    C.Release(O);
+    AssertEquals(2, C.Reclaim);
+    AssertEquals(0, C.RetiredCount);
+    AssertFalse('overflow state reset', C.Overflowed);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestAcquire.TestReleaseMisuse;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  Ch: TPromChild;
+  Raised: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('mis_total', 'x', ['k']);
+    Ch := C.Acquire(['a']);
+    C.Release(Ch);
+    Raised := False;
+    try
+      C.Release(Ch);
+    except
+      on EInvalidOperation do Raised := True;
+    end;
+    AssertTrue('double release', Raised);
+    Raised := False;
+    try
+      C.Release(nil);
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue('nil', Raised);
+    // the failed release left the count at zero, so the child can still be removed and freed
+    C.Remove(['a']);
+    AssertEquals(0, C.RetiredCount);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestAcquire.TestNoLabelFamily;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  Ch: TPromCounterChild;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('nol_total', 'x');
+    Ch := TPromCounterChild(C.Acquire([]));
+    Ch.Inc;
+    C.Release(Ch);
+    AssertEquals(1, C.Value, 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestAcquire.TestConcurrentChurn;
+const
+  Workers = 4;
+var
+  R: TPromRegistry;
+  C: TPromCounter;
+  T: array[0..Workers - 1] of TAcquireThread;
+  I: Integer;
+  Failed, Done: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    C := R.Counter('churn_total', 'x', ['k']);
+    for I := 0 to Workers - 1 do
+      T[I] := TAcquireThread.Create(C, I + 1);
+    repeat
+      Done := True;
+      for I := 0 to Workers - 1 do
+        if not T[I].Finished then Done := False;
+      R.Collect;   // scrapes race with remove/free
+      R.Collect(pfOpenMetrics);
+    until Done;
+    Failed := False;
+    for I := 0 to Workers - 1 do
+    begin
+      T[I].WaitFor;
+      if T[I].Failed then Failed := True;
+      T[I].Free;
+    end;
+    AssertFalse('worker failed', Failed);
+    C.Reclaim;
+    AssertEquals('nothing left once everyone released', 0, C.RetiredCount);
+  finally
+    R.Free;
+  end;
+end;
+
 initialization
+  RegisterTest(TTestAcquire);
   RegisterTest(TTestStriped);
   RegisterTest(TTestGolden);
   RegisterTest(TTestExemplars);

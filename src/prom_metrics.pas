@@ -4,7 +4,9 @@ unit prom_metrics;
 
   A family owns one child per distinct label-value combination. Children are
   created on first use. Remove/Clear retire a child instead of freeing it, so a
-  child pointer stays valid for the lifetime of the family. In hot code, cache the child:
+  child pointer from Labels() stays valid for the lifetime of the family (children that
+  come and go can use Acquire/Release instead and are really freed). In hot code, cache
+  the child:
 
     Ok := Requests.Labels(['GET', '200']);   // once
     Ok.Inc;                                  // lock-free, per request
@@ -51,6 +53,8 @@ type
     FPairs: string;   // preformatted, escaped: a="x",b="y"
     FCreated: Double; // Unix seconds from PromEpochSeconds, set when the family makes the child
     FExLock: TCriticalSection;   // the family's exemplar lock (not owned); guards exemplar slots
+    FRefs: Int64;     // holders from Acquire and running scrapes; only changed by atomics
+    FPinned: Int64;   // 1 once Labels() handed out an uncounted pointer: never freed before the family
   protected
     procedure CollectSamples(W: TPromTextWriter; const MetricName: string); virtual; abstract;
     { OpenMetrics only: the "<BaseName>_created" sample. }
@@ -65,9 +69,13 @@ type
     FNoLabels: TPromChild;       // set for label-less families, immutable after Create
     FMaxChildren: Integer;       // 0 = unlimited; guarded by FLock
     FOverflow: TPromChild;       // shared child for combinations beyond the cap
-    FRetired: TList;             // removed children, owned, freed only in Destroy
+    FRetired: TList;             // removed children that were handed out by Labels(): owned, freed only in Destroy
+    FPending: TList;             // removed children only Acquire/scrapes saw: owned, freed by Sweep at refs = 0
     FExLock: TCriticalSection;   // shared by the children; only exemplar recording/scraping take it
     function GetRetiredCount: Integer;
+    function FindOrCreate(const Values: array of string; Counted: Boolean): TPromChild;
+    procedure Retire(C: TPromChild);      // caller holds the write lock
+    procedure Sweep;                      // caller holds the write lock
     function MakeKey(const Values: array of string): string;
     procedure SetMaxChildren(Value: Integer);
     function GetOverflowed: Boolean;
@@ -97,7 +105,20 @@ type
     function Remove(const Values: array of string): Boolean;
     { Retire every child, including the overflow child; Overflowed becomes False. }
     procedure Clear;
-    { Number of retired children kept alive until the family is destroyed. }
+    { Counted access, for label sets that come and go. Labels() returns a pointer that stays
+      valid until the family is destroyed, so a child it handed out is never freed. Acquire
+      returns the child with a reference taken (cast it, e.g. TPromCounterChild(F.Acquire([..])));
+      the pointer is valid until the matching Release, and the series is freed only after it
+      was removed (Remove/Clear) and every holder released it. Pass the same child to Release
+      exactly once; using it afterwards is a bug. A child that was ever returned by Labels()
+      is never freed, whatever Acquire does. Freeing happens in Remove, Clear, when a new
+      child is created and in Reclaim, never in Release. }
+    function Acquire(const Values: array of string): TPromChild;
+    procedure Release(Child: TPromChild);
+    { Free removed children nobody holds any more; returns how many were freed. }
+    function Reclaim: Integer;
+    { Number of removed children still in memory: those pinned by Labels() until the family
+      is destroyed, plus those waiting for their last Release. }
     property RetiredCount: Integer read GetRetiredCount;
     { True once any combination has been diverted to the overflow child. }
     property Overflowed: Boolean read GetOverflowed;
@@ -439,6 +460,7 @@ begin
   FChildren.Sorted := True;
   FChildren.OwnsObjects := True;
   FRetired := TList.Create;
+  FPending := TList.Create;
   FExLock := TCriticalSection.Create;
   if Length(FLabelNames) = 0 then
     FNoLabels := NewChild;   // subclasses must be ready for this before inherited Create
@@ -452,6 +474,10 @@ begin
     for I := 0 to FRetired.Count - 1 do
       TObject(FRetired[I]).Free;
   FRetired.Free;
+  if FPending <> nil then
+    for I := 0 to FPending.Count - 1 do
+      TObject(FPending[I]).Free;
+  FPending.Free;
   FNoLabels.Free;
   FOverflow.Free;
   FChildren.Free;
@@ -513,9 +539,68 @@ function TPromFamily.GetRetiredCount: Integer;
 begin
   FLock.BeginRead;
   try
-    Result := FRetired.Count;
+    Result := FRetired.Count + FPending.Count;
   finally
     FLock.EndRead;
+  end;
+end;
+
+procedure TPromFamily.Retire(C: TPromChild);
+begin
+  // Pinned is only ever set under the read lock, so under the write lock it cannot change:
+  // a pinned child may still be cached by a caller and lives until Destroy.
+  if AtomicLoadInt64(C.FPinned) <> 0 then
+    FRetired.Add(C)
+  else
+    FPending.Add(C);
+end;
+
+procedure TPromFamily.Sweep;
+var
+  I: Integer;
+  C: TPromChild;
+begin
+  // Acquire and the scrape snapshot take their references under the read lock, which the
+  // caller's write lock excludes: a pending child's count can only fall while we look at it,
+  // so FRefs = 0 is final and nobody touches the child after their decrement.
+  for I := FPending.Count - 1 downto 0 do
+  begin
+    C := TPromChild(FPending[I]);
+    if AtomicLoadInt64(C.FRefs) = 0 then
+    begin
+      FPending.Delete(I);
+      C.Free;
+    end;
+  end;
+end;
+
+function TPromFamily.Reclaim: Integer;
+var
+  Before: Integer;
+begin
+  FLock.BeginWrite;
+  try
+    Before := FPending.Count;
+    Sweep;
+    Result := Before - FPending.Count;
+  finally
+    FLock.EndWrite;
+  end;
+end;
+
+function TPromFamily.Acquire(const Values: array of string): TPromChild;
+begin
+  Result := FindOrCreate(Values, True);
+end;
+
+procedure TPromFamily.Release(Child: TPromChild);
+begin
+  if Child = nil then
+    raise EArgumentException.Create('Release needs a child returned by Acquire');
+  if AtomicAddInt64(Child.FRefs, -1) < 0 then
+  begin
+    AtomicAddInt64(Child.FRefs, 1);
+    raise EInvalidOperation.Create('Release without a matching Acquire');
   end;
 end;
 
@@ -533,9 +618,10 @@ begin
     Result := FChildren.Find(MakeKey(Values), Idx);
     if Result then
     begin
-      FRetired.Add(FChildren.Objects[Idx]);
+      Retire(TPromChild(FChildren.Objects[Idx]));
       FChildren.Objects[Idx] := nil;   // OwnsObjects would free it on Delete
       FChildren.Delete(Idx);
+      Sweep;
     end;
   finally
     FLock.EndWrite;
@@ -552,15 +638,16 @@ begin
   try
     for I := 0 to FChildren.Count - 1 do
     begin
-      FRetired.Add(FChildren.Objects[I]);
+      Retire(TPromChild(FChildren.Objects[I]));
       FChildren.Objects[I] := nil;
     end;
     FChildren.Clear;
     if FOverflow <> nil then
     begin
-      FRetired.Add(FOverflow);
+      Retire(FOverflow);
       FOverflow := nil;
     end;
+    Sweep;
   finally
     FLock.EndWrite;
   end;
@@ -590,15 +677,35 @@ begin
 end;
 
 function TPromFamily.GetChild(const Values: array of string): TPromChild;
+begin
+  Result := FindOrCreate(Values, False);
+end;
+
+function TPromFamily.FindOrCreate(const Values: array of string; Counted: Boolean): TPromChild;
 var
   Key: string;
   Idx: Integer;
+
+  // Called while the lock that found the child is still held: a removal (write lock)
+  // cannot slip in between the lookup and the claim.
+  procedure Claim(C: TPromChild);
+  begin
+    if Counted then
+      AtomicAddInt64(C.FRefs, 1)
+    else
+      AtomicStoreInt64(C.FPinned, 1);
+  end;
+
 begin
   if Length(Values) <> Length(FLabelNames) then
     raise EArgumentException.CreateFmt('Metric "%s" expects %d label value(s), got %d',
       [FName, Length(FLabelNames), Length(Values)]);
   if FNoLabels <> nil then
+  begin
+    if Counted then
+      AtomicAddInt64(FNoLabels.FRefs, 1);   // keeps Acquire/Release symmetric; never freed anyway
     Exit(FNoLabels);
+  end;
 
   Key := MakeKey(Values);
   Result := nil;
@@ -608,6 +715,8 @@ begin
       Result := TPromChild(FChildren.Objects[Idx])
     else if (FOverflow <> nil) and (FMaxChildren > 0) and (FChildren.Count >= FMaxChildren) then
       Result := FOverflow;   // already capped: stay on the read lock
+    if Result <> nil then
+      Claim(Result);
   finally
     FLock.EndRead;
   end;
@@ -622,10 +731,12 @@ begin
       Result := OverflowChild
     else
     begin
+      Sweep;   // creating is a natural moment to free removed children nobody holds
       Result := NewChild;
       Result.FPairs := PromFormatLabelPairs(FLabelNames, Values);
       FChildren.AddObject(Key, Result);
     end;
+    Claim(Result);
   finally
     FLock.EndWrite;
   end;
@@ -652,11 +763,19 @@ begin
         Snapshot.Add(FChildren.Objects[I]);
       if FOverflow <> nil then
         Snapshot.Add(FOverflow);
+      // hold every child for the duration of the scrape: a Remove during it only retires
+      for I := 0 to Snapshot.Count - 1 do
+        AtomicAddInt64(TPromChild(Snapshot[I]).FRefs, 1);
     finally
       FLock.EndRead;
     end;
-    for I := 0 to Snapshot.Count - 1 do
-      TPromChild(Snapshot[I]).CollectSamples(W, SName);
+    try
+      for I := 0 to Snapshot.Count - 1 do
+        TPromChild(Snapshot[I]).CollectSamples(W, SName);
+    finally
+      for I := 0 to Snapshot.Count - 1 do
+        AtomicAddInt64(TPromChild(Snapshot[I]).FRefs, -1);
+    end;
   finally
     Snapshot.Free;
   end;

@@ -12,3 +12,4 @@ project README, "Provenance"). Do not reverse a decision here without a new ADR.
 | [0003](0003-relative-error-quantile-sketch.md) | DDSketch-style sketch for summary quantiles |
 | [0004](0004-strict-name-clash-check.md) | Name clashes are refused as strictly as OpenMetrics needs |
 | [0005](0005-64-bit-only.md) | 64-bit CPUs only |
+| [0006](0006-retired-children-and-refcounting.md) | Retired children, opt-in refcounted Acquire/Release |
