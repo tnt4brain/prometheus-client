@@ -36,6 +36,9 @@ function PromEscapeHelp(const S: string): string;
 function PromFormatFloat(V: Double): string;
 { Name without Suffix when it ends with it (and is longer), else Name unchanged. }
 function PromStripSuffix(const Name, Suffix: string): string;
+{ The metric family name used in OpenMetrics # TYPE/# UNIT/# HELP lines: a counter loses
+  "_total", an info metric loses "_info". MetricType is the logical type string. }
+function PromOpenMetricsFamilyName(const MetricType, Name: string): string;
 function PromValidMetricName(const S: string): Boolean;
 function PromValidLabelName(const S: string): Boolean;
 { a="x",b="y" with values escaped; Names and Values must have equal length. }
@@ -240,6 +243,16 @@ begin
     SetLength(Result, Length(Name) - Length(Suffix));
 end;
 
+function PromOpenMetricsFamilyName(const MetricType, Name: string): string;
+begin
+  if MetricType = 'counter' then
+    Result := PromStripSuffix(Name, '_total')
+  else if MetricType = 'info' then
+    Result := PromStripSuffix(Name, '_info')
+  else
+    Result := Name;
+end;
+
 function TPromTextWriter.SampleName(const MetricType, Name: string): string;
 begin
   if (FFormat = pfOpenMetrics) and (MetricType = 'counter') then
@@ -267,20 +280,17 @@ procedure TPromTextWriter.WriteHeader(const Name, Help, MetricType: string;
 var
   N, T, H: string;
 begin
-  N := Name;
   T := MetricType;
   if FFormat = pfOpenMetrics then
   begin
-    if T = 'counter' then
-      N := PromStripSuffix(N, '_total')
-    else if T = 'info' then
-      N := PromStripSuffix(N, '_info')
-    else if T = 'untyped' then
+    N := PromOpenMetricsFamilyName(T, Name);
+    if T = 'untyped' then
       T := 'unknown';
     H := PromEscapeLabelValue(Help);   // OpenMetrics HELP also escapes quotes
   end
   else
   begin
+    N := Name;
     if T = 'info' then
       T := 'gauge';
     H := PromEscapeHelp(Help);

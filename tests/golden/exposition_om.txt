@@ -5,6 +5,7 @@ http_requests_created{method="GET",code="200"} 1700000001
 http_requests_total{method="POST",code="500"} 3
 http_requests_created{method="POST",code="500"} 1700000000
 # TYPE temperature_celsius gauge
+# UNIT temperature_celsius celsius
 # HELP temperature_celsius Plain gauge.
 temperature_celsius -3.5
 # TYPE special_values gauge
@@ -22,6 +23,7 @@ special_values{kind="minus_inf"} -Inf
 # HELP escaped_labels Label value escaping.
 escaped_labels{path="a\"b\\c\ncafé"} 1
 # TYPE rpc_seconds histogram
+# UNIT rpc_seconds seconds
 # HELP rpc_seconds RPC latency.
 rpc_seconds_bucket{svc="a",le="0.1"} 1
 rpc_seconds_bucket{svc="a",le="1.0"} 3
@@ -43,6 +45,7 @@ plain_seconds_sum 0.25
 plain_seconds_count 1
 plain_seconds_created 1700000015
 # TYPE payload_bytes summary
+# UNIT payload_bytes bytes
 # HELP payload_bytes Payload sizes.
 payload_bytes_sum 350
 payload_bytes_count 2
@@ -54,6 +57,7 @@ legacy_value 7
 # HELP build Build information.
 build_info{version="1.4",commit="abc123"} 1
 # TYPE fake_cpu_seconds counter
+# UNIT fake_cpu_seconds seconds
 # HELP fake_cpu_seconds Callback counter.
 fake_cpu_seconds_total 12.5
 # TYPE queue_depth gauge

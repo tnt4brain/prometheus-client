@@ -27,6 +27,7 @@ type
   public
     constructor Create(const AName, AHelp, AMetricType: string; AFunc: TPromValueFunc);
     procedure Collect(W: TPromTextWriter); override;
+    function ExposedType: string; override;
   end;
 
   { Receives the samples of one scrape from a TPromCallbackFamily callback. }
@@ -54,6 +55,7 @@ type
     constructor Create(const AName, AHelp, AMetricType: string;
       const ALabelNames: array of string; AProc: TPromSamplesProc);
     procedure Collect(W: TPromTextWriter); override;
+    function ExposedType: string; override;
   end;
 
 { process_cpu_seconds_total, process_resident_memory_bytes, process_virtual_memory_bytes,
@@ -88,8 +90,13 @@ var
 begin
   if not FFunc(V) then
     Exit;
-  W.WriteHeader(Name, Help, FType);
+  W.WriteHeader(Name, Help, FType, MetricUnit);
   W.WriteSample(W.SampleName(FType, Name), '', V);
+end;
+
+function TPromCallbackMetric.ExposedType: string;
+begin
+  Result := FType;
 end;
 
 { TPromSamples }
@@ -139,12 +146,17 @@ begin
   try
     S.FLabelNames := FLabelNames;
     FProc(S);
-    W.WriteHeader(Name, Help, FType);
+    W.WriteHeader(Name, Help, FType, MetricUnit);
     for I := 0 to High(S.FPairs) do
       W.WriteSample(W.SampleName(FType, Name), S.FPairs[I], S.FValues[I]);
   finally
     S.Free;
   end;
+end;
+
+function TPromCallbackFamily.ExposedType: string;
+begin
+  Result := FType;
 end;
 
 { ---- process, Windows ---- }

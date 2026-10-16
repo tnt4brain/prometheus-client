@@ -29,11 +29,20 @@ type
   private
     FName: string;
     FHelp: string;
+    FUnit: string;
+    procedure SetUnit(const AUnit: string);
   public
     constructor Create(const AName, AHelp: string);
     procedure Collect(W: TPromTextWriter); virtual; abstract;
+    { Logical type: counter, gauge, histogram, summary, untyped, info, stateset, ... }
+    function ExposedType: string; virtual;
     property Name: string read FName;
     property Help: string read FHelp;
+    { OpenMetrics "# UNIT" (ignored in the text format), e.g. 'seconds'. Set once, right
+      after creating the metric: the family name must end with "_<unit>" (counters: without
+      "_total"), and info / stateset metrics cannot have a unit. Raises EArgumentException for
+      a unit that does not fit and EInvalidOperation if a unit was already set. }
+    property MetricUnit: string read FUnit write SetUnit;
   end;
 
   { One time series (one label-value combination). }
@@ -67,6 +76,9 @@ type
   protected
     function CreateChild: TPromChild; virtual; abstract;
     function MetricType: string; virtual; abstract;
+  public
+    function ExposedType: string; override;
+  protected
     function GetChild(const Values: array of string): TPromChild;
     function NoLabelChild: TPromChild;
   public
@@ -306,6 +318,32 @@ implementation
 
 { TPromMetric }
 
+function TPromMetric.ExposedType: string;
+begin
+  Result := 'unknown';
+end;
+
+procedure TPromMetric.SetUnit(const AUnit: string);
+var
+  T, Family: string;
+begin
+  if AUnit = '' then
+    Exit;
+  if FUnit <> '' then   // set-once: a scrape may be reading the string right now
+    raise EInvalidOperation.CreateFmt('Metric "%s" already has the unit "%s"', [FName, FUnit]);
+  if not PromValidMetricName(AUnit) then
+    raise EArgumentException.CreateFmt('Invalid unit "%s"', [AUnit]);
+  T := ExposedType;
+  if (T = 'info') or (T = 'stateset') then
+    raise EArgumentException.CreateFmt('A %s metric cannot have a unit', [T]);
+  Family := PromOpenMetricsFamilyName(T, FName);
+  if (Length(Family) <= Length(AUnit) + 1) or
+     (Copy(Family, Length(Family) - Length(AUnit), Length(AUnit) + 1) <> '_' + AUnit) then
+    raise EArgumentException.CreateFmt('The unit "%s" must be a suffix of the metric name "%s"',
+      [AUnit, Family]);
+  FUnit := AUnit;
+end;
+
 constructor TPromMetric.Create(const AName, AHelp: string);
 begin
   inherited Create;
@@ -388,6 +426,11 @@ begin
   finally
     FLock.EndRead;
   end;
+end;
+
+function TPromFamily.ExposedType: string;
+begin
+  Result := MetricType;
 end;
 
 function TPromFamily.NewChild: TPromChild;
@@ -531,7 +574,7 @@ var
   I: Integer;
   SName: string;
 begin
-  W.WriteHeader(FName, FHelp, MetricType);
+  W.WriteHeader(FName, FHelp, MetricType, FUnit);
   SName := W.SampleName(MetricType, FName);
   if FNoLabels <> nil then
   begin

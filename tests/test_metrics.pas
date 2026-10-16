@@ -92,6 +92,12 @@ type
     procedure TestSummaryWindow;
   end;
 
+  TTestUnits = class(TTestCase)
+  published
+    procedure TestUnitInHeaders;
+    procedure TestUnitValidation;
+  end;
+
   TTestServer = class(TTestCase)
   published
     procedure TestServeMetrics;
@@ -1285,7 +1291,9 @@ begin
     C.Labels(['POST', '500']).Inc(3);
     C.Labels(['GET', '200']).Inc(1027);
 
-    R.Gauge('temperature_celsius', 'Plain gauge.').SetValue(-3.5);
+    G := R.Gauge('temperature_celsius', 'Plain gauge.');
+    G.MetricUnit := 'celsius';
+    G.SetValue(-3.5);
 
     G := R.Gauge('special_values', 'Float formatting corner cases.', ['kind']);
     G.Labels(['nan']).SetValue(NaN);
@@ -1305,6 +1313,7 @@ begin
       ['a"b\c' + #10 + 'caf' + #$C3#$A9]).SetValue(1);
 
     H := R.Histogram('rpc_seconds', 'RPC latency.', ['svc'], [0.1, 1]);
+    H.MetricUnit := 'seconds';
     H.Labels(['a']).Observe(0.05);
     H.Labels(['a']).Observe(0.5);
     H.Labels(['a']).Observe(0.5);
@@ -1314,6 +1323,7 @@ begin
     R.Histogram('plain_seconds', 'No labels.', [0.5]).Observe(0.25);
 
     S := R.Summary('payload_bytes', 'Payload sizes.');
+    S.MetricUnit := 'bytes';
     S.Observe(100);
     S.Observe(250);
 
@@ -1321,7 +1331,7 @@ begin
     R.Info('build', 'Build information.', ['version', 'commit']).Publish(['1.4', 'abc123']);
 
     R.Register(TPromCallbackMetric.Create('fake_cpu_seconds_total', 'Callback counter.',
-      'counter', @FakeCpuSeconds));
+      'counter', @FakeCpuSeconds)).MetricUnit := 'seconds';
     R.Register(TPromCallbackMetric.Create('fake_unavailable', 'Callback with no value.',
       'gauge', @FakeUnavailable));
     R.Register(TPromCallbackFamily.Create('queue_depth', 'Callback family.', 'gauge',
@@ -2081,6 +2091,74 @@ begin
   end;
 end;
 
+procedure TTestUnits.TestUnitInHeaders;
+var
+  R: TPromRegistry;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    R.Histogram('job_seconds', 'Job time.', [1]).MetricUnit := 'seconds';
+    R.Counter('sent_bytes_total', 'Sent.').MetricUnit := 'bytes';
+    R.Register(TPromCallbackMetric.Create('cb_seconds', 'cb', 'gauge', @FakeCpuSeconds)).MetricUnit := 'seconds';
+    S := R.Collect(pfOpenMetrics);
+    AssertTrue(S, Pos('# TYPE job_seconds histogram' + #10 + '# UNIT job_seconds seconds' + #10 +
+      '# HELP job_seconds Job time.' + #10, S) > 0);
+    // a counter's unit refers to the family name without _total
+    AssertTrue(S, Pos('# TYPE sent_bytes counter' + #10 + '# UNIT sent_bytes bytes' + #10, S) > 0);
+    AssertTrue(S, Pos('# UNIT cb_seconds seconds' + #10, S) > 0);
+    // the classic format has no UNIT lines
+    AssertTrue(R.Collect, Pos('# UNIT', R.Collect) = 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestUnits.TestUnitValidation;
+var
+  R: TPromRegistry;
+
+  procedure Rejects(M: TPromMetric; const U: string; ExpectInvalidOp: Boolean; const What: string);
+  var
+    Raised: Boolean;
+  begin
+    Raised := False;
+    try
+      M.MetricUnit := U;
+    except
+      on EInvalidOperation do Raised := ExpectInvalidOp;
+      on EArgumentException do Raised := not ExpectInvalidOp;
+    end;
+    AssertTrue(What, Raised);
+    AssertEquals(What + ': unit unchanged', '', M.MetricUnit);
+  end;
+
+begin
+  R := TPromRegistry.Create;
+  try
+    Rejects(R.Gauge('foo_bytes', 'x'), 'seconds', False, 'not a suffix');
+    Rejects(R.Gauge('seconds', 'x'), 'seconds', False, 'unit equals the whole name');
+    Rejects(R.Gauge('weird_bytes', 'x'), 'by-tes', False, 'invalid characters');
+    Rejects(R.Counter('jobs_total', 'x'), 'total', False, 'counter family name has no _total');
+    Rejects(R.Info('build', 'x', ['v']), 'info', False, 'info cannot have a unit');
+    R.Gauge('ok_seconds', 'x').MetricUnit := '';        // empty is a no-op
+    with R.Gauge('twice_seconds', 'x') do
+    begin
+      MetricUnit := 'seconds';
+      AssertEquals('seconds', MetricUnit);
+      try
+        MetricUnit := 'seconds';
+        Fail('second assignment accepted');
+      except
+        on EInvalidOperation do ;
+      end;
+      AssertEquals('seconds', MetricUnit);
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
 procedure TTestServer.TestServeMetrics;
 const
   TestPort = 19187;
@@ -2144,6 +2222,7 @@ initialization
   RegisterTest(TTestGolden);
   RegisterTest(TTestExemplars);
   RegisterTest(TTestQuantiles);
+  RegisterTest(TTestUnits);
   RegisterTest(TTestServer);
   RegisterTest(TTestStress);
   RegisterTest(TTestAtomic);
