@@ -12,6 +12,10 @@ uses
 
 const
   PromContentType = 'text/plain; version=0.0.4; charset=utf-8';
+  PromOpenMetricsContentType = 'application/openmetrics-text; version=1.0.0; charset=utf-8';
+
+type
+  TPromFormat = (pfText, pfOpenMetrics);
 
 function PromEscapeLabelValue(const S: string): string;
 function PromEscapeHelp(const S: string): string;
@@ -22,16 +26,29 @@ function PromValidLabelName(const S: string): Boolean;
 function PromFormatLabelPairs(const Names, Values: array of string): string;
 
 type
+  { MetricType is the logical type: counter, gauge, histogram, summary, untyped or info.
+    The writer maps it to the chosen format: untyped is "unknown" and info a gauge in
+    OpenMetrics resp. text format; a counter's family name loses "_total" in OpenMetrics
+    (its samples keep/gain it), an info family's name loses "_info". }
   TPromTextWriter = class
   private
     FOut: TStringStream;
+    FFormat: TPromFormat;
   public
-    constructor Create;
+    constructor Create(AFormat: TPromFormat = pfText);
     destructor Destroy; override;
     procedure WriteHeader(const Name, Help, MetricType: string);
+    { Name of the sample lines for a family registered as Name (counters: ..._total in
+      OpenMetrics). Suffixes like _bucket/_sum/_count are appended by the caller. }
+    function SampleName(const MetricType, Name: string): string;
+    { Text of a histogram "le" label value: OpenMetrics wants a float, 1 becomes 1.0. }
+    function FormatLe(V: Double): string;
     { LabelPairs is already formatted, e.g. method="GET",code="200"; may be empty. }
     procedure WriteSample(const Name, LabelPairs: string; Value: Double);
+    { Terminates the document (# EOF in OpenMetrics, nothing in text format). }
+    procedure Finish;
     function Text: string;
+    property Format: TPromFormat read FFormat;
   end;
 
 implementation
@@ -146,10 +163,35 @@ end;
 
 { TPromTextWriter }
 
-constructor TPromTextWriter.Create;
+constructor TPromTextWriter.Create(AFormat: TPromFormat);
 begin
   inherited Create;
+  FFormat := AFormat;
   FOut := TStringStream.Create('');
+end;
+
+function StripSuffix(const Name, Suffix: string): string;
+begin
+  Result := Name;
+  if (Length(Name) > Length(Suffix)) and
+     (Copy(Name, Length(Name) - Length(Suffix) + 1, Length(Suffix)) = Suffix) then
+    SetLength(Result, Length(Name) - Length(Suffix));
+end;
+
+function TPromTextWriter.SampleName(const MetricType, Name: string): string;
+begin
+  if (FFormat = pfOpenMetrics) and (MetricType = 'counter') then
+    Result := StripSuffix(Name, '_total') + '_total'
+  else
+    Result := Name;
+end;
+
+function TPromTextWriter.FormatLe(V: Double): string;
+begin
+  Result := PromFormatFloat(V);
+  if (FFormat = pfOpenMetrics) and not IsInfinite(V) and not IsNan(V) and
+     (Pos('.', Result) = 0) and (Pos('e', Result) = 0) then
+    Result := Result + '.0';
 end;
 
 destructor TPromTextWriter.Destroy;
@@ -159,10 +201,36 @@ begin
 end;
 
 procedure TPromTextWriter.WriteHeader(const Name, Help, MetricType: string);
+var
+  N, T, H: string;
 begin
+  N := Name;
+  T := MetricType;
+  if FFormat = pfOpenMetrics then
+  begin
+    if T = 'counter' then
+      N := StripSuffix(N, '_total')
+    else if T = 'info' then
+      N := StripSuffix(N, '_info')
+    else if T = 'untyped' then
+      T := 'unknown';
+    H := PromEscapeLabelValue(Help);   // OpenMetrics HELP also escapes quotes
+  end
+  else
+  begin
+    if T = 'info' then
+      T := 'gauge';
+    H := PromEscapeHelp(Help);
+  end;
   if Help <> '' then
-    FOut.WriteString('# HELP ' + Name + ' ' + PromEscapeHelp(Help) + #10);
-  FOut.WriteString('# TYPE ' + Name + ' ' + MetricType + #10);
+    FOut.WriteString('# HELP ' + N + ' ' + H + #10);
+  FOut.WriteString('# TYPE ' + N + ' ' + T + #10);
+end;
+
+procedure TPromTextWriter.Finish;
+begin
+  if FFormat = pfOpenMetrics then
+    FOut.WriteString('# EOF' + #10);
 end;
 
 procedure TPromTextWriter.WriteSample(const Name, LabelPairs: string; Value: Double);

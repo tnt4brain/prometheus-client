@@ -89,7 +89,7 @@ begin
   if not FFunc(V) then
     Exit;
   W.WriteHeader(Name, Help, FType);
-  W.WriteSample(Name, '', V);
+  W.WriteSample(W.SampleName(FType, Name), '', V);
 end;
 
 { TPromSamples }
@@ -141,7 +141,7 @@ begin
     FProc(S);
     W.WriteHeader(Name, Help, FType);
     for I := 0 to High(S.FPairs) do
-      W.WriteSample(Name, S.FPairs[I], S.FValues[I]);
+      W.WriteSample(W.SampleName(FType, Name), S.FPairs[I], S.FValues[I]);
   finally
     S.Free;
   end;

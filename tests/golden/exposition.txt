@@ -1,4 +1,4 @@
-# HELP http_requests_total Total requests.\nSecond line with \\ backslash.
+# HELP http_requests_total Total requests.\nSecond line with \\ backslash and "quotes".
 # TYPE http_requests_total counter
 http_requests_total{method="GET",code="200"} 1027
 http_requests_total{method="POST",code="500"} 3
@@ -61,3 +61,9 @@ capped_total{id="__overflow__"} 5
 # HELP removed_total Removed child.
 # TYPE removed_total counter
 removed_total{id="stays"} 4
+# HELP bare_events Counter without suffix.
+# TYPE bare_events counter
+bare_events 2
+# HELP plain_callback Callback counter without suffix.
+# TYPE plain_callback counter
+plain_callback 12.5

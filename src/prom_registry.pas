@@ -32,7 +32,7 @@ type
     function Untyped(const Name, Help: string): TPromUntyped; overload;
     function Untyped(const Name, Help: string; const LabelNames: array of string): TPromUntyped; overload;
     function Info(const Name, Help: string; const LabelNames: array of string): TPromInfo;
-    function Collect: string;
+    function Collect(AFormat: TPromFormat = pfText): string;
   end;
 
 function DefaultRegistry: TPromRegistry;
@@ -146,7 +146,7 @@ begin
   Result := Register(TPromInfo.Create(Name, Help, LabelNames)) as TPromInfo;
 end;
 
-function TPromRegistry.Collect: string;
+function TPromRegistry.Collect(AFormat: TPromFormat): string;
 var
   Snapshot: TList;
   W: TPromTextWriter;
@@ -160,10 +160,11 @@ begin
     finally
       FLock.Leave;
     end;
-    W := TPromTextWriter.Create;
+    W := TPromTextWriter.Create(AFormat);
     try
       for I := 0 to Snapshot.Count - 1 do
         TPromMetric(Snapshot[I]).Collect(W);
+      W.Finish;
       Result := W.Text;
     finally
       W.Free;

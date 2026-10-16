@@ -7,7 +7,7 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testregistry, prom_atomic, prom_metrics, prom_registry,
-  prom_exposition, prom_collectors, prom_clock, prom_server, fphttpclient, Math, DateUtils;
+  prom_exposition, prom_collectors, prom_clock, prom_server, prom_http, fphttpclient, Math, DateUtils;
 
 type
   TTestAtomic = class(TTestCase)
@@ -62,8 +62,12 @@ type
   private
     procedure FillQueues(Samples: TPromSamples);
     procedure CheckGolden(const FileName, Actual: string);
+    procedure FillGoldenRegistry(R: TPromRegistry);
   published
     procedure TestFullExposition;
+    procedure TestFullOpenMetrics;
+    procedure TestEmptyRegistry;
+    procedure TestNegotiate;
   end;
 
   TTestServer = class(TTestCase)
@@ -1244,19 +1248,17 @@ begin
   AssertEquals('exposition differs from ' + FileName, Expected, Actual);
 end;
 
-procedure TTestGolden.TestFullExposition;
+procedure TTestGolden.FillGoldenRegistry(R: TPromRegistry);
 var
-  R: TPromRegistry;
   C: TPromCounter;
   G: TPromGauge;
   H: TPromHistogram;
   S: TPromSummary;
   A, B: Double;
 begin
-  R := TPromRegistry.Create;
-  try
-    C := R.Counter('http_requests_total', 'Total requests.' + #10 + 'Second line with \ backslash.',
-      ['method', 'code']);
+  begin
+    C := R.Counter('http_requests_total',
+      'Total requests.' + #10 + 'Second line with \ backslash and "quotes".', ['method', 'code']);
     C.Labels(['POST', '500']).Inc(3);
     C.Labels(['GET', '200']).Inc(1027);
 
@@ -1313,10 +1315,74 @@ begin
     C.Labels(['stays']).Inc(4);
     C.Remove(['gone']);
 
+    // counter registered without the _total suffix: OpenMetrics adds it to the samples
+    R.Counter('bare_events', 'Counter without suffix.').Inc(2);
+    R.Register(TPromCallbackMetric.Create('plain_callback', 'Callback counter without suffix.',
+      'counter', @FakeCpuSeconds));
+  end;
+end;
+
+procedure TTestGolden.TestFullExposition;
+var
+  R: TPromRegistry;
+begin
+  R := TPromRegistry.Create;
+  try
+    FillGoldenRegistry(R);
     CheckGolden('exposition.txt', R.Collect);
   finally
     R.Free;
   end;
+end;
+
+procedure TTestGolden.TestFullOpenMetrics;
+var
+  R: TPromRegistry;
+begin
+  R := TPromRegistry.Create;
+  try
+    FillGoldenRegistry(R);
+    CheckGolden('exposition_om.txt', R.Collect(pfOpenMetrics));
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestGolden.TestEmptyRegistry;
+var
+  R: TPromRegistry;
+begin
+  R := TPromRegistry.Create;
+  try
+    AssertEquals('', R.Collect);
+    AssertEquals('# EOF' + #10, R.Collect(pfOpenMetrics));
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestGolden.TestNegotiate;
+begin
+  AssertTrue('empty', PromNegotiateFormat('') = pfText);
+  AssertTrue('*/*', PromNegotiateFormat('*/*') = pfText);
+  AssertTrue('text only', PromNegotiateFormat('text/plain;version=0.0.4') = pfText);
+  AssertTrue('om only', PromNegotiateFormat('application/openmetrics-text') = pfOpenMetrics);
+  AssertTrue('om with version', PromNegotiateFormat(
+    'application/openmetrics-text; version=1.0.0; charset=utf-8') = pfOpenMetrics);
+  AssertTrue('prometheus default', PromNegotiateFormat(
+    'application/openmetrics-text;version=1.0.0,application/openmetrics-text;version=0.0.1;q=0.75,' +
+    'text/plain;version=0.0.4;q=0.5,*/*;q=0.1') = pfOpenMetrics);
+  AssertTrue('text preferred by q', PromNegotiateFormat(
+    'application/openmetrics-text;q=0.5, text/plain;q=0.9') = pfText);
+  AssertTrue('om preferred by q', PromNegotiateFormat(
+    'text/plain;q=0.2, application/openmetrics-text;q=0.8') = pfOpenMetrics);
+  AssertTrue('tie: first listed', PromNegotiateFormat(
+    'application/openmetrics-text, text/plain') = pfOpenMetrics);
+  AssertTrue('tie: first listed 2', PromNegotiateFormat(
+    'text/plain, application/openmetrics-text') = pfText);
+  AssertTrue('q=0 refuses', PromNegotiateFormat('application/openmetrics-text;q=0') = pfText);
+  AssertTrue('case-insensitive', PromNegotiateFormat('Application/OpenMetrics-Text') = pfOpenMetrics);
+  AssertTrue('junk', PromNegotiateFormat('application/json;q=1') = pfText);
 end;
 
 procedure TTestServer.TestServeMetrics;
@@ -1350,6 +1416,14 @@ begin
       Gauge.SetValue(43);
       Body := Client.Get('http://127.0.0.1:' + IntToStr(TestPort) + '/metrics');
       AssertTrue('second: ' + Body, Pos('served 43' + #10, Body) > 0);
+      // content negotiation: OpenMetrics when asked for
+      Client.AddHeader('Accept', 'application/openmetrics-text;version=1.0.0;q=1,text/plain;q=0.5');
+      Body := Client.Get('http://127.0.0.1:' + IntToStr(TestPort) + '/metrics');
+      AssertTrue(Client.GetHeader(Client.ResponseHeaders, 'Content-Type'),
+        Pos('application/openmetrics-text', Client.GetHeader(Client.ResponseHeaders, 'Content-Type')) > 0);
+      AssertTrue('om: ' + Body, Pos('# TYPE served unknown' + #10, Body) > 0);
+      AssertTrue('eof: ' + Body, Copy(Body, Length(Body) - 5, 6) = '# EOF' + #10);
+      Client.RequestHeaders.Clear;
       Failed404 := False;
       try
         Client.Get('http://127.0.0.1:' + IntToStr(TestPort) + '/nope');

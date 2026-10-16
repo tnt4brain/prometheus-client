@@ -108,7 +108,7 @@ begin
   else
   begin
     try
-      Body := MetricsBody(FRegistry);
+      Body := MetricsResponse(FRegistry, ARequest.Accept, CType);
     except
       on E: Exception do
       begin

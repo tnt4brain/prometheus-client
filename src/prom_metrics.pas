@@ -478,11 +478,13 @@ procedure TPromFamily.Collect(W: TPromTextWriter);
 var
   Snapshot: TList;
   I: Integer;
+  SName: string;
 begin
   W.WriteHeader(FName, FHelp, MetricType);
+  SName := W.SampleName(MetricType, FName);
   if FNoLabels <> nil then
   begin
-    FNoLabels.CollectSamples(W, FName);
+    FNoLabels.CollectSamples(W, SName);
     Exit;
   end;
   Snapshot := TList.Create;
@@ -497,7 +499,7 @@ begin
       FLock.EndRead;
     end;
     for I := 0 to Snapshot.Count - 1 do
-      TPromChild(Snapshot[I]).CollectSamples(W, FName);
+      TPromChild(Snapshot[I]).CollectSamples(W, SName);
   finally
     Snapshot.Free;
   end;
@@ -670,7 +672,7 @@ begin
   for I := 0 to High(FOwner.FUpper) do
   begin
     Cum := Cum + AtomicLoadInt64(FCounts[I]);
-    W.WriteSample(MetricName + '_bucket', Sep + 'le="' + PromFormatFloat(FOwner.FUpper[I]) + '"', Cum);
+    W.WriteSample(MetricName + '_bucket', Sep + 'le="' + W.FormatLe(FOwner.FUpper[I]) + '"', Cum);
   end;
   Cum := Cum + AtomicLoadInt64(FCounts[High(FCounts)]);
   W.WriteSample(MetricName + '_bucket', Sep + 'le="+Inf"', Cum);
@@ -820,7 +822,7 @@ end;
 
 function TPromInfo.MetricType: string;
 begin
-  Result := 'gauge';
+  Result := 'info';   // the writer emits a gauge in text format
 end;
 
 function TPromInfo.Publish(const Values: array of string): TPromInfoChild;

@@ -13,15 +13,17 @@ Runtime-only package, FCL only (no LCL), so it works in console apps and service
 - `src/prom_registry` - thread-safe registry, `DefaultRegistry`
 - `src/prom_http` - `MetricsBody` + content type; bring your own HTTP server
 - `src/prom_collectors` - process and FPC heap metrics, labelled callback metrics, computed on scrape
+- `src/prom_server` - optional `/metrics` HTTP server (fphttpserver), negotiates text 0.0.4 or OpenMetrics
 - `tests/` - FPCUnit console tests (`lazbuild tests/prom_tests.lpi`)
 - `examples/metrics_demo.lpr`
 
 ## Roadmap
-1. ~~Labelled children~~ (done: `Labels(...)`, RW-locked lookup, cached children; no child removal yet)
+1. ~~Labelled children~~ (done: `Labels(...)`, RW-locked lookup, cached children, `Remove`/`Clear`, `MaxChildren` cap)
 2. ~~Shortest round-trip float formatting~~ (done)
 3. ~~Process and FPC heap collectors~~ (done; tested on Windows x64 and Linux x86_64)
-4. Optional bundled HTTP server unit
-5. OpenMetrics output, striped counters for extreme contention
+4. ~~Optional bundled HTTP server unit~~ (done: `prom_server`, with Accept negotiation)
+5. ~~OpenMetrics 1.0 text output~~ (done; `_created` and exemplars still open)
+6. Summary quantiles, striped counters for extreme contention
 
 ## Provenance
 Designed and directed by Sergei Pechenko: the requirements, design decisions (recorded as
