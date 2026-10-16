@@ -8,10 +8,11 @@ Runtime-only package, FCL only (no LCL), so it works in console apps and service
 - `prometheus_fpc.lpk` - the package
 - `src/prom_atomic` - CAS-based atomic Int64/Double
 - `src/prom_exposition` - text format 0.0.4 (escaping, float format, name validation)
-- `src/prom_metrics` - counter, gauge, histogram (optional labels)
+- `src/prom_metrics` - counter, gauge, histogram, untyped, info (optional labels), histogram timer
+- `src/prom_clock` - monotonic clock
 - `src/prom_registry` - thread-safe registry, `DefaultRegistry`
 - `src/prom_http` - `MetricsBody` + content type; bring your own HTTP server
-- `src/prom_collectors` - process and FPC heap metrics, computed on scrape
+- `src/prom_collectors` - process and FPC heap metrics, labelled callback metrics, computed on scrape
 - `tests/` - FPCUnit console tests (`lazbuild tests/prom_tests.lpi`)
 - `examples/metrics_demo.lpr`
 

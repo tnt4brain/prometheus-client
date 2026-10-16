@@ -29,6 +29,33 @@ type
     procedure Collect(W: TPromTextWriter); override;
   end;
 
+  { Receives the samples of one scrape from a TPromCallbackFamily callback. }
+  TPromSamples = class
+  private
+    FLabelNames: array of string;
+    FPairs: array of string;
+    FValues: array of Double;
+  public
+    { LabelValues must match the family's label names in number. }
+    procedure Add(const LabelValues: array of string; Value: Double);
+  end;
+
+  TPromSamplesProc = procedure(Samples: TPromSamples) of object;
+
+  { A counter or gauge with labels whose series are produced by Proc on each scrape,
+    e.g. queue depth per queue. Proc may raise: the scrape then fails as a whole and
+    nothing from this family is written. Proc runs on the scraping thread. }
+  TPromCallbackFamily = class(TPromMetric)
+  private
+    FType: string;
+    FLabelNames: array of string;
+    FProc: TPromSamplesProc;
+  public
+    constructor Create(const AName, AHelp, AMetricType: string;
+      const ALabelNames: array of string; AProc: TPromSamplesProc);
+    procedure Collect(W: TPromTextWriter); override;
+  end;
+
 { process_cpu_seconds_total, process_resident_memory_bytes, process_virtual_memory_bytes,
   process_start_time_seconds, process_open_fds. }
 procedure RegisterProcessMetrics(R: TPromRegistry);
@@ -63,6 +90,61 @@ begin
     Exit;
   W.WriteHeader(Name, Help, FType);
   W.WriteSample(Name, '', V);
+end;
+
+{ TPromSamples }
+
+procedure TPromSamples.Add(const LabelValues: array of string; Value: Double);
+var
+  N: Integer;
+begin
+  if Length(LabelValues) <> Length(FLabelNames) then
+    raise EArgumentException.CreateFmt('Expected %d label value(s), got %d',
+      [Length(FLabelNames), Length(LabelValues)]);
+  N := Length(FPairs);
+  SetLength(FPairs, N + 1);
+  SetLength(FValues, N + 1);
+  FPairs[N] := PromFormatLabelPairs(FLabelNames, LabelValues);
+  FValues[N] := Value;
+end;
+
+{ TPromCallbackFamily }
+
+constructor TPromCallbackFamily.Create(const AName, AHelp, AMetricType: string;
+  const ALabelNames: array of string; AProc: TPromSamplesProc);
+var
+  I, J: Integer;
+begin
+  inherited Create(AName, AHelp);
+  SetLength(FLabelNames, Length(ALabelNames));
+  for I := 0 to High(ALabelNames) do
+  begin
+    if not PromValidLabelName(ALabelNames[I]) then
+      raise EArgumentException.CreateFmt('Invalid label name "%s"', [ALabelNames[I]]);
+    for J := 0 to I - 1 do
+      if FLabelNames[J] = ALabelNames[I] then
+        raise EArgumentException.CreateFmt('Duplicate label name "%s"', [ALabelNames[I]]);
+    FLabelNames[I] := ALabelNames[I];
+  end;
+  FType := AMetricType;
+  FProc := AProc;
+end;
+
+procedure TPromCallbackFamily.Collect(W: TPromTextWriter);
+var
+  S: TPromSamples;
+  I: Integer;
+begin
+  S := TPromSamples.Create;
+  try
+    S.FLabelNames := FLabelNames;
+    FProc(S);
+    W.WriteHeader(Name, Help, FType);
+    for I := 0 to High(S.FPairs) do
+      W.WriteSample(Name, S.FPairs[I], S.FValues[I]);
+  finally
+    S.Free;
+  end;
 end;
 
 { ---- process, Windows ---- }

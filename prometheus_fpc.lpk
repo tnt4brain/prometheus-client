@@ -40,6 +40,10 @@
         <Filename Value="src/prom_collectors.pas"/>
         <UnitName Value="prom_collectors"/>
       </Item>
+      <Item>
+        <Filename Value="src/prom_clock.pas"/>
+        <UnitName Value="prom_clock"/>
+      </Item>
     </Files>
     <RequiredPkgs>
       <Item>

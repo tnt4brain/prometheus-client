@@ -27,6 +27,9 @@ type
     function Histogram(const Name, Help: string; const Buckets: array of Double): TPromHistogram; overload;
     function Histogram(const Name, Help: string; const LabelNames: array of string;
       const Buckets: array of Double): TPromHistogram; overload;
+    function Untyped(const Name, Help: string): TPromUntyped; overload;
+    function Untyped(const Name, Help: string; const LabelNames: array of string): TPromUntyped; overload;
+    function Info(const Name, Help: string; const LabelNames: array of string): TPromInfo;
     function Collect: string;
   end;
 
@@ -111,6 +114,23 @@ function TPromRegistry.Histogram(const Name, Help: string;
   const LabelNames: array of string; const Buckets: array of Double): TPromHistogram;
 begin
   Result := Register(TPromHistogram.Create(Name, Help, LabelNames, Buckets)) as TPromHistogram;
+end;
+
+function TPromRegistry.Untyped(const Name, Help: string): TPromUntyped;
+begin
+  Result := Untyped(Name, Help, []);
+end;
+
+function TPromRegistry.Untyped(const Name, Help: string;
+  const LabelNames: array of string): TPromUntyped;
+begin
+  Result := Register(TPromUntyped.Create(Name, Help, LabelNames)) as TPromUntyped;
+end;
+
+function TPromRegistry.Info(const Name, Help: string;
+  const LabelNames: array of string): TPromInfo;
+begin
+  Result := Register(TPromInfo.Create(Name, Help, LabelNames)) as TPromInfo;
 end;
 
 function TPromRegistry.Collect: string;

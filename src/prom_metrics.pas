@@ -13,11 +13,12 @@ unit prom_metrics;
   time a combination is seen). Value updates are always lock-free. }
 
 {$mode objfpc}{$H+}
+{$modeswitch advancedrecords}
 
 interface
 
 uses
-  SysUtils, Classes, prom_atomic, prom_exposition;
+  SysUtils, Classes, prom_atomic, prom_exposition, prom_clock;
 
 type
   TPromMetric = class
@@ -109,6 +110,22 @@ type
   { Histogram }
 
   TPromHistogram = class;
+  TPromHistogramChild = class;
+
+  { Measures elapsed wall time with a monotonic clock and observes it, in seconds:
+
+      T := Latency.StartTimer;      // or Latency.Labels([...]).StartTimer
+      DoWork;
+      T.ObserveDuration;
+
+    A plain record: no allocation, nothing happens if ObserveDuration is not called. }
+  TPromTimer = record
+  private
+    FTarget: TPromHistogramChild;
+    FStart: Double;
+  public
+    function ObserveDuration: Double;
+  end;
 
   TPromHistogramChild = class(TPromChild)
   private
@@ -120,6 +137,7 @@ type
   public
     constructor Create(AOwner: TPromHistogram);
     procedure Observe(V: Double);
+    function StartTimer: TPromTimer;
   end;
 
   TPromHistogram = class(TPromFamily)
@@ -133,6 +151,35 @@ type
       const Buckets: array of Double);
     function Labels(const Values: array of string): TPromHistogramChild;
     procedure Observe(V: Double);
+    function StartTimer: TPromTimer;
+  end;
+
+  { Untyped: a gauge exposed with "# TYPE ... untyped", for values whose kind is
+    unknown (typically bridged from another system). }
+  TPromUntyped = class(TPromGauge)
+  protected
+    function MetricType: string; override;
+  end;
+
+  { Info: a constant 1 whose labels carry descriptive data such as a version.
+    The name gets the conventional "_info" suffix if it is not there already.
+
+      Info := Registry.Info('build', 'Build information.', ['version', 'commit']);
+      Info.Publish(['1.4.2', 'bb2ba61']);   // exposes build_info with those labels, value 1 }
+
+  TPromInfoChild = class(TPromChild)
+  protected
+    procedure CollectSamples(W: TPromTextWriter; const MetricName: string); override;
+  end;
+
+  TPromInfo = class(TPromFamily)
+  protected
+    function CreateChild: TPromChild; override;
+    function MetricType: string; override;
+  public
+    { At least one label is required (an info metric without labels says nothing). }
+    constructor Create(const AName, AHelp: string; const ALabelNames: array of string);
+    function Publish(const Values: array of string): TPromInfoChild;
   end;
 
 implementation
@@ -449,6 +496,68 @@ end;
 procedure TPromHistogram.Observe(V: Double);
 begin
   TPromHistogramChild(NoLabelChild).Observe(V);
+end;
+
+function TPromHistogram.StartTimer: TPromTimer;
+begin
+  Result := TPromHistogramChild(NoLabelChild).StartTimer;
+end;
+
+{ Timer }
+
+function TPromHistogramChild.StartTimer: TPromTimer;
+begin
+  Result.FTarget := Self;
+  Result.FStart := PromMonotonicSeconds;
+end;
+
+function TPromTimer.ObserveDuration: Double;
+begin
+  Result := PromMonotonicSeconds - FStart;
+  if Result < 0 then
+    Result := 0;
+  FTarget.Observe(Result);
+end;
+
+{ Untyped }
+
+function TPromUntyped.MetricType: string;
+begin
+  Result := 'untyped';
+end;
+
+{ Info }
+
+procedure TPromInfoChild.CollectSamples(W: TPromTextWriter; const MetricName: string);
+begin
+  W.WriteSample(MetricName, FPairs, 1);
+end;
+
+constructor TPromInfo.Create(const AName, AHelp: string; const ALabelNames: array of string);
+var
+  N: string;
+begin
+  if Length(ALabelNames) = 0 then
+    raise EArgumentException.Create('An info metric needs at least one label');
+  N := AName;
+  if Copy(N, Length(N) - 4, 5) <> '_info' then
+    N := N + '_info';
+  inherited Create(N, AHelp, ALabelNames);
+end;
+
+function TPromInfo.CreateChild: TPromChild;
+begin
+  Result := TPromInfoChild.Create;
+end;
+
+function TPromInfo.MetricType: string;
+begin
+  Result := 'gauge';
+end;
+
+function TPromInfo.Publish(const Values: array of string): TPromInfoChild;
+begin
+  Result := TPromInfoChild(GetChild(Values));
 end;
 
 end.

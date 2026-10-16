@@ -26,6 +26,20 @@ type
     procedure TestConcurrentLabels;
   end;
 
+  TTestMoreTypes = class(TTestCase)
+  private
+    FFail: Boolean;
+    procedure FillQueues(Samples: TPromSamples);
+  published
+    procedure TestUntyped;
+    procedure TestInfo;
+    procedure TestInfoNeedsLabels;
+    procedure TestTimer;
+    procedure TestLabeledTimer;
+    procedure TestCallbackFamily;
+    procedure TestCallbackFamilyErrors;
+  end;
+
   TTestCollectors = class(TTestCase)
   published
     procedure TestHeapMetrics;
@@ -85,6 +99,155 @@ begin
     T[I].Free;
   end;
   AssertEquals('sum', Double(ThreadCount * Iterations), AtomicLoadDouble(Bits));
+end;
+
+procedure TTestMoreTypes.FillQueues(Samples: TPromSamples);
+begin
+  if FFail then
+    raise Exception.Create('boom');
+  Samples.Add(['mail'], 3);
+  Samples.Add(['sms'], 0.5);
+end;
+
+procedure TTestMoreTypes.TestUntyped;
+var
+  R: TPromRegistry;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    R.Untyped('legacy', 'From elsewhere.').SetValue(7);
+    S := R.Collect;
+    AssertEquals('# HELP legacy From elsewhere.' + #10 + '# TYPE legacy untyped' + #10 +
+      'legacy 7' + #10, S);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestInfo;
+var
+  R: TPromRegistry;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    R.Info('build', 'Build info.', ['version', 'commit']).Publish(['1.4', 'abc']);
+    R.Info('app_info', 'App.', ['name']).Publish(['x"y']);
+    S := R.Collect;
+    AssertTrue(S, Pos('# TYPE build_info gauge' + #10 +
+      'build_info{version="1.4",commit="abc"} 1' + #10, S) > 0);
+    AssertTrue(S, Pos('app_info{name="x\"y"} 1' + #10, S) > 0);  // no double suffix
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestInfoNeedsLabels;
+var
+  R: TPromRegistry;
+  Raised: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    Raised := False;
+    try
+      R.Info('x', 'x', []);
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue(Raised);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestTimer;
+var
+  R: TPromRegistry;
+  H: TPromHistogram;
+  T: TPromTimer;
+  D: Double;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    H := R.Histogram('work_seconds', 'Work.', [0.001, 10]);
+    T := H.StartTimer;
+    Sleep(30);
+    D := T.ObserveDuration;
+    AssertTrue('duration ' + FloatToStr(D), (D >= 0.025) and (D < 5));
+    S := R.Collect;
+    AssertTrue(S, Pos('work_seconds_bucket{le="0.001"} 0' + #10, S) > 0);
+    AssertTrue(S, Pos('work_seconds_bucket{le="10"} 1' + #10, S) > 0);
+    AssertTrue(S, Pos('work_seconds_count 1' + #10, S) > 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestLabeledTimer;
+var
+  R: TPromRegistry;
+  H: TPromHistogram;
+  T: TPromTimer;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    H := R.Histogram('rpc_seconds', 'RPC.', ['method'], [10]);
+    T := H.Labels(['get']).StartTimer;
+    T.ObserveDuration;
+    S := R.Collect;
+    AssertTrue(S, Pos('rpc_seconds_count{method="get"} 1' + #10, S) > 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestCallbackFamily;
+var
+  R: TPromRegistry;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    R.Register(TPromCallbackFamily.Create('queue_depth', 'Depth.', 'gauge', ['queue'],
+      @FillQueues));
+    S := R.Collect;
+    AssertEquals('# HELP queue_depth Depth.' + #10 + '# TYPE queue_depth gauge' + #10 +
+      'queue_depth{queue="mail"} 3' + #10 + 'queue_depth{queue="sms"} 0.5' + #10, S);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestMoreTypes.TestCallbackFamilyErrors;
+var
+  R: TPromRegistry;
+  Raised: Boolean;
+begin
+  R := TPromRegistry.Create;
+  try
+    R.Register(TPromCallbackFamily.Create('q', 'q', 'gauge', ['queue'], @FillQueues));
+    FFail := True;
+    Raised := False;
+    try
+      R.Collect;
+    except
+      on Exception do Raised := True;
+    end;
+    AssertTrue('callback error propagates', Raised);
+    Raised := False;
+    try
+      TPromCallbackFamily.Create('q2', 'q', 'gauge', ['a', 'a'], @FillQueues).Free;
+    except
+      on EArgumentException do Raised := True;
+    end;
+    AssertTrue('duplicate label names rejected', Raised);
+  finally
+    R.Free;
+  end;
 end;
 
 procedure TTestCollectors.TestHeapMetrics;
@@ -385,5 +548,6 @@ initialization
   RegisterTest(TTestLabels);
   RegisterTest(TTestExposition);
   RegisterTest(TTestCollectors);
+  RegisterTest(TTestMoreTypes);
 
 end.
