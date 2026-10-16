@@ -14,7 +14,7 @@
     </CompilerOptions>
     <Description Value="Prometheus client for Free Pascal with lock-free, thread-safe metrics (counter, gauge, histogram) and text exposition format 0.0.4."/>
     <License Value="BSD-3-Clause"/>
-    <Version Minor="2"/>
+    <Version Minor="3"/>
     <Files>
       <Item>
         <Filename Value="src/prom_atomic.pas"/>
