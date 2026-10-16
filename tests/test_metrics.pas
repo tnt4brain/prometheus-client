@@ -45,6 +45,12 @@ type
     procedure TestTrackInProgress;
   end;
 
+  { Every metric type hammered from several threads while another thread scrapes. }
+  TTestStress = class(TTestCase)
+  published
+    procedure TestAllTypesConcurrentWithScrapes;
+  end;
+
   TTestCollectors = class(TTestCase)
   published
     procedure TestHeapMetrics;
@@ -649,7 +655,187 @@ begin
   end;
 end;
 
+const
+  StressIterations = 100000;   // divisible by 4 (label buckets)
+
+type
+  TStressRig = class
+  public
+    Registry: TPromRegistry;
+    Counter: TPromCounter;
+    Gauge: TPromGauge;
+    InFlight: TPromGauge;
+    Hist: TPromHistogram;
+    Summ: TPromSummary;
+    Labeled: TPromCounter;
+    Stop: LongInt;   // set with InterlockedExchange
+    constructor Create;
+    destructor Destroy; override;
+  end;
+
+  { Base: remembers the first exception so the test thread can report it. }
+  TStressThread = class(TThread)
+  protected
+    FRig: TStressRig;
+    procedure Run; virtual; abstract;
+    procedure Execute; override;
+  public
+    Error: string;
+    constructor Create(ARig: TStressRig);
+  end;
+
+  TStressWorker = class(TStressThread)
+  protected
+    procedure Run; override;
+  end;
+
+  TStressScraper = class(TStressThread)
+  protected
+    procedure Run; override;
+  public
+    Scrapes: Integer;
+  end;
+
+constructor TStressRig.Create;
+begin
+  inherited Create;
+  Registry := TPromRegistry.Create;
+  Counter := Registry.Counter('stress_total', 'c');
+  Gauge := Registry.Gauge('stress_gauge', 'g');
+  InFlight := Registry.Gauge('stress_inflight', 'g');
+  Hist := Registry.Histogram('stress_hist', 'h', [0.25, 1]);
+  Summ := Registry.Summary('stress_summary', 's');
+  Labeled := Registry.Counter('stress_labeled_total', 'l', ['k']);
+end;
+
+destructor TStressRig.Destroy;
+begin
+  Registry.Free;
+  inherited Destroy;
+end;
+
+constructor TStressThread.Create(ARig: TStressRig);
+begin
+  FRig := ARig;
+  inherited Create(True);   // started together by the test for maximum contention
+end;
+
+procedure TStressThread.Execute;
+begin
+  try
+    Run;
+  except
+    on E: Exception do
+      Error := E.ClassName + ': ' + E.Message;
+  end;
+end;
+
+procedure TStressWorker.Run;
+var
+  I: Integer;
+  P: TPromInProgress;
+begin
+  for I := 1 to StressIterations do
+  begin
+    FRig.Counter.Inc;
+    FRig.Gauge.Inc(2);
+    FRig.Gauge.Dec(1);                 // net +1 per iteration
+    P := FRig.InFlight.TrackInProgress;
+    P.Done;                            // net 0
+    FRig.Hist.Observe(0.5);            // lands in the le="1" bucket; sums stay exact
+    FRig.Summ.Observe(0.25);
+    FRig.Labeled.Labels([IntToStr(I mod 4)]).Inc;   // lookup path, 4 shared children
+  end;
+end;
+
+procedure TStressScraper.Run;
+var
+  Text: string;
+  Last, Cur: Double;
+  P, Q: Integer;
+  FS: TFormatSettings;
+begin
+  FS := DefaultFormatSettings;
+  FS.DecimalSeparator := '.';
+  Last := -1;
+  repeat
+    Text := FRig.Registry.Collect;
+    Inc(Scrapes);
+    if Pos('# TYPE stress_hist histogram' + #10, Text) = 0 then
+      raise Exception.Create('scrape lost a family');
+    P := Pos(#10 + 'stress_total ', Text);
+    if P = 0 then
+      raise Exception.Create('scrape lost stress_total');
+    P := P + Length(#10 + 'stress_total ');
+    Q := P;
+    while (Q <= Length(Text)) and (Text[Q] <> #10) do
+      Inc(Q);
+    if not TryStrToFloat(Copy(Text, P, Q - P), Cur, FS) then
+      raise Exception.Create('unparsable counter: ' + Copy(Text, P, Q - P));
+    if Cur < Last then
+      raise Exception.CreateFmt('counter went backwards: %g -> %g', [Last, Cur]);
+    Last := Cur;
+    Sleep(0);   // yield only: Sleep(1) is ~15 ms on Windows and would hide most of the run
+  until InterlockedCompareExchange(FRig.Stop, 0, 0) <> 0;
+end;
+
+procedure TTestStress.TestAllTypesConcurrentWithScrapes;
+var
+  Rig: TStressRig;
+  Workers: array[0..ThreadCount - 1] of TStressWorker;
+  Scraper: TStressScraper;
+  I, K: Integer;
+  Total: Int64;
+  Text: string;
+begin
+  Total := Int64(ThreadCount) * StressIterations;
+  Rig := TStressRig.Create;
+  try
+    Scraper := TStressScraper.Create(Rig);
+    for I := 0 to ThreadCount - 1 do
+      Workers[I] := TStressWorker.Create(Rig);
+    try
+      Scraper.Start;
+      for I := 0 to ThreadCount - 1 do
+        Workers[I].Start;
+      for I := 0 to ThreadCount - 1 do
+        Workers[I].WaitFor;
+      InterlockedExchange(Rig.Stop, 1);
+      Scraper.WaitFor;
+      for I := 0 to ThreadCount - 1 do
+        AssertEquals('worker ' + IntToStr(I), '', Workers[I].Error);
+      AssertEquals('scraper', '', Scraper.Error);
+      // ~5000 scrapes were seen on the dev machine; 100 proves real overlap with the writers
+      AssertTrue('scrapes overlapped the run: ' + IntToStr(Scraper.Scrapes),
+        Scraper.Scrapes >= 100);
+    finally
+      for I := 0 to ThreadCount - 1 do
+        Workers[I].Free;
+      Scraper.Free;
+    end;
+
+    AssertEquals('counter', Double(Total), Rig.Counter.Value);
+    AssertEquals('gauge net', Double(Total), Rig.Gauge.Value);
+    AssertEquals('in flight back to 0', 0.0, Rig.InFlight.Value);
+
+    Text := Rig.Registry.Collect;
+    AssertTrue(Text, Pos('stress_hist_bucket{le="0.25"} 0' + #10, Text) > 0);
+    AssertTrue(Text, Pos('stress_hist_bucket{le="1"} ' + IntToStr(Total) + #10, Text) > 0);
+    AssertTrue(Text, Pos('stress_hist_bucket{le="+Inf"} ' + IntToStr(Total) + #10, Text) > 0);
+    AssertTrue(Text, Pos('stress_hist_sum ' + PromFormatFloat(0.5 * Total) + #10, Text) > 0);
+    AssertTrue(Text, Pos('stress_hist_count ' + IntToStr(Total) + #10, Text) > 0);
+    AssertTrue(Text, Pos('stress_summary_sum ' + PromFormatFloat(0.25 * Total) + #10, Text) > 0);
+    AssertTrue(Text, Pos('stress_summary_count ' + IntToStr(Total) + #10, Text) > 0);
+    for K := 0 to 3 do
+      AssertTrue(Text, Pos('stress_labeled_total{k="' + IntToStr(K) + '"} ' +
+        IntToStr(Total div 4) + #10, Text) > 0);
+  finally
+    Rig.Free;
+  end;
+end;
+
 initialization
+  RegisterTest(TTestStress);
   RegisterTest(TTestAtomic);
   RegisterTest(TTestLabels);
   RegisterTest(TTestExposition);
