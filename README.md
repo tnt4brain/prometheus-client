@@ -11,13 +11,14 @@ Runtime-only package, FCL only (no LCL), so it works in console apps and service
 - `src/prom_metrics` - counter, gauge, histogram (optional labels)
 - `src/prom_registry` - thread-safe registry, `DefaultRegistry`
 - `src/prom_http` - `MetricsBody` + content type; bring your own HTTP server
+- `src/prom_collectors` - process and FPC heap metrics, computed on scrape
 - `tests/` - FPCUnit console tests (`lazbuild tests/prom_tests.lpi`)
 - `examples/metrics_demo.lpr`
 
 ## Roadmap
 1. ~~Labelled children~~ (done: `Labels(...)`, RW-locked lookup, cached children; no child removal yet)
-2. Shortest round-trip float formatting
-3. Process and FPC heap collectors
+2. ~~Shortest round-trip float formatting~~ (done)
+3. ~~Process and FPC heap collectors~~ (done; Unix branch untested)
 4. Optional bundled HTTP server unit
 5. OpenMetrics output, striped counters for extreme contention
 

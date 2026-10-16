@@ -11,39 +11,40 @@
         <OtherUnitFiles Value="src"/>
         <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
       </SearchPaths>
-      <Other>
-        <CompilerPath Value="$(CompPath)"/>
-      </Other>
     </CompilerOptions>
     <Description Value="Prometheus client for Free Pascal with lock-free, thread-safe metrics (counter, gauge, histogram) and text exposition format 0.0.4."/>
     <License Value="BSD-3-Clause"/>
     <Version Minor="1"/>
-    <Files Count="5">
-      <Item1>
+    <Files>
+      <Item>
         <Filename Value="src/prom_atomic.pas"/>
         <UnitName Value="prom_atomic"/>
-      </Item1>
-      <Item2>
+      </Item>
+      <Item>
         <Filename Value="src/prom_exposition.pas"/>
         <UnitName Value="prom_exposition"/>
-      </Item2>
-      <Item3>
+      </Item>
+      <Item>
         <Filename Value="src/prom_metrics.pas"/>
         <UnitName Value="prom_metrics"/>
-      </Item3>
-      <Item4>
+      </Item>
+      <Item>
         <Filename Value="src/prom_registry.pas"/>
         <UnitName Value="prom_registry"/>
-      </Item4>
-      <Item5>
+      </Item>
+      <Item>
         <Filename Value="src/prom_http.pas"/>
         <UnitName Value="prom_http"/>
-      </Item5>
+      </Item>
+      <Item>
+        <Filename Value="src/prom_collectors.pas"/>
+        <UnitName Value="prom_collectors"/>
+      </Item>
     </Files>
-    <RequiredPkgs Count="1">
-      <Item1>
+    <RequiredPkgs>
+      <Item>
         <PackageName Value="FCL"/>
-      </Item1>
+      </Item>
     </RequiredPkgs>
     <UsageOptions>
       <UnitPath Value="$(PkgOutDir)"/>

@@ -7,7 +7,7 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testregistry, prom_atomic, prom_metrics, prom_registry,
-  prom_exposition, Math;
+  prom_exposition, prom_collectors, Math;
 
 type
   TTestAtomic = class(TTestCase)
@@ -24,6 +24,12 @@ type
     procedure TestLabeledHistogramOutput;
     procedure TestEscapedLabelValue;
     procedure TestConcurrentLabels;
+  end;
+
+  TTestCollectors = class(TTestCase)
+  published
+    procedure TestHeapMetrics;
+    procedure TestProcessMetrics;
   end;
 
   TTestExposition = class(TTestCase)
@@ -79,6 +85,42 @@ begin
     T[I].Free;
   end;
   AssertEquals('sum', Double(ThreadCount * Iterations), AtomicLoadDouble(Bits));
+end;
+
+procedure TTestCollectors.TestHeapMetrics;
+var
+  R: TPromRegistry;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    RegisterHeapMetrics(R);
+    S := R.Collect;
+    AssertTrue(S, Pos('# TYPE fpc_heap_used_bytes gauge' + #10 + 'fpc_heap_used_bytes ', S) > 0);
+    AssertTrue(S, Pos('fpc_heap_size_bytes ', S) > 0);
+    AssertTrue(S, Pos('fpc_heap_free_bytes ', S) > 0);
+  finally
+    R.Free;
+  end;
+end;
+
+procedure TTestCollectors.TestProcessMetrics;
+var
+  R: TPromRegistry;
+  S: string;
+begin
+  R := TPromRegistry.Create;
+  try
+    RegisterProcessMetrics(R);
+    S := R.Collect;
+    AssertTrue(S, Pos('# TYPE process_cpu_seconds_total counter', S) > 0);
+    AssertTrue(S, Pos(#10 + 'process_resident_memory_bytes ', S) > 0);
+    AssertTrue(S, Pos(#10 + 'process_virtual_memory_bytes ', S) > 0);
+    AssertTrue(S, Pos(#10 + 'process_start_time_seconds 1', S) > 0);  // epoch seconds, 10 digits
+    AssertTrue(S, Pos(#10 + 'process_open_fds ', S) > 0);
+  finally
+    R.Free;
+  end;
 end;
 
 procedure TTestExposition.TestEscape;
@@ -342,5 +384,6 @@ initialization
   RegisterTest(TTestAtomic);
   RegisterTest(TTestLabels);
   RegisterTest(TTestExposition);
+  RegisterTest(TTestCollectors);
 
 end.

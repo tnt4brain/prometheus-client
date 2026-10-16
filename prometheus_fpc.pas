@@ -8,7 +8,8 @@ unit prometheus_fpc;
 interface
 
 uses
-  prom_atomic, prom_exposition, prom_metrics, prom_registry, prom_http;
+  prom_atomic, prom_exposition, prom_metrics, prom_registry, prom_http, 
+  prom_collectors;
 
 implementation
 
