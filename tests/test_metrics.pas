@@ -7,7 +7,7 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testregistry, prom_atomic, prom_metrics, prom_registry,
-  prom_exposition, prom_collectors, prom_clock, Math, DateUtils;
+  prom_exposition, prom_collectors, prom_clock, prom_server, fphttpclient, Math, DateUtils;
 
 type
   TTestAtomic = class(TTestCase)
@@ -49,6 +49,11 @@ type
   TTestStress = class(TTestCase)
   published
     procedure TestAllTypesConcurrentWithScrapes;
+  end;
+
+  TTestServer = class(TTestCase)
+  published
+    procedure TestServeMetrics;
   end;
 
   TTestCollectors = class(TTestCase)
@@ -879,7 +884,59 @@ begin
   end;
 end;
 
+procedure TTestServer.TestServeMetrics;
+const
+  TestPort = 19187;
+var
+  R: TPromRegistry;
+  Srv: TPromServer;
+  Client: TFPHTTPClient;
+  Body: string;
+  Failed404: Boolean;
+  Gauge: TPromUntyped;
+begin
+  R := TPromRegistry.Create;
+  Srv := TPromServer.Create(TestPort, R);
+  try
+    Gauge := R.Untyped('served', 'Over HTTP.');
+    Gauge.SetValue(42);
+    Srv.Start;
+    AssertTrue('active', Srv.Active);
+    Client := TFPHTTPClient.Create(nil);
+    try
+      Body := Client.Get('http://127.0.0.1:' + IntToStr(TestPort) + '/metrics');
+      AssertEquals(200, Client.ResponseStatusCode);
+      AssertTrue(Client.GetHeader(Client.ResponseHeaders, 'Content-Type'),
+        Pos('version=0.0.4', Client.GetHeader(Client.ResponseHeaders, 'Content-Type')) > 0);
+      AssertTrue('first, tail bytes ' + IntToStr(Ord(Body[Length(Body)])) + ',' +
+        IntToStr(Ord(Body[Length(Body) - 1])) + ',' + IntToStr(Ord(Body[Length(Body) - 2])) +
+        ' len ' + IntToStr(Length(Body)), Pos('served 42' + #10, Body) > 0);
+      // a second scrape on the same server sees updated values
+      Gauge.SetValue(43);
+      Body := Client.Get('http://127.0.0.1:' + IntToStr(TestPort) + '/metrics');
+      AssertTrue('second: ' + Body, Pos('served 43' + #10, Body) > 0);
+      Failed404 := False;
+      try
+        Client.Get('http://127.0.0.1:' + IntToStr(TestPort) + '/nope');
+      except
+        on EHTTPClient do
+          Failed404 := True;
+      end;
+      AssertTrue('404 raised', Failed404);
+      AssertEquals(404, Client.ResponseStatusCode);
+    finally
+      Client.Free;
+    end;
+    Srv.Stop;
+    AssertFalse('stopped', Srv.Active);
+  finally
+    Srv.Free;
+    R.Free;
+  end;
+end;
+
 initialization
+  RegisterTest(TTestServer);
   RegisterTest(TTestStress);
   RegisterTest(TTestAtomic);
   RegisterTest(TTestLabels);
