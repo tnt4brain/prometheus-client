@@ -19,7 +19,7 @@ Runtime-only package, FCL only (no LCL), so it works in console apps and service
 ## Roadmap
 1. ~~Labelled children~~ (done: `Labels(...)`, RW-locked lookup, cached children; no child removal yet)
 2. ~~Shortest round-trip float formatting~~ (done)
-3. ~~Process and FPC heap collectors~~ (done; Unix branch untested)
+3. ~~Process and FPC heap collectors~~ (done; tested on Windows x64 and Linux x86_64)
 4. Optional bundled HTTP server unit
 5. OpenMetrics output, striped counters for extreme contention
 

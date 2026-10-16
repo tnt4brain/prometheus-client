@@ -71,7 +71,7 @@ uses
 {$ENDIF}
 {$IFDEF UNIX}
 uses
-  BaseUnix, Unix;
+  StrUtils;
 {$ENDIF}
 
 constructor TPromCallbackMetric.Create(const AName, AHelp, AMetricType: string;
@@ -177,7 +177,7 @@ var
 begin
   Result := GetProcessTimes(GetCurrentProcess, C, E, K, U);
   if Result then
-    V := (FileTimeToInt64(K) + FileTimeToInt64(U)) / 1e7;
+    V := Double(FileTimeToInt64(K) + FileTimeToInt64(U)) / 1e7;   // Double(): see ProcStartTime
 end;
 
 function ProcStartTime(out V: Double): Boolean;
@@ -186,7 +186,9 @@ var
 begin
   Result := GetProcessTimes(GetCurrentProcess, C, E, K, U);
   if Result then
-    V := (FileTimeToInt64(C) - FileTimeUnixEpoch) / 1e7;
+    // Double() matters: Int64 / 1e7 alone is evaluated in Single precision by FPC, which
+    // rounds an epoch time to 128 s.
+    V := Double(FileTimeToInt64(C) - FileTimeUnixEpoch) / 1e7;
 end;
 
 function ProcResidentBytes(out V: Double): Boolean;
@@ -224,7 +226,7 @@ end;
 {$IFDEF UNIX}
 type
   TProcStat = record
-    UTime, STime, StartTime, VSize, RssPages: Int64;
+    UTime, STime, StartTime: Int64;   // clock ticks
   end;
 
 { /proc/self/stat: the command name sits in parentheses and may contain spaces, so
@@ -260,19 +262,43 @@ begin
   S.UTime := StrToInt64Def(Parts[11], 0);
   S.STime := StrToInt64Def(Parts[12], 0);
   S.StartTime := StrToInt64Def(Parts[19], 0);
-  S.VSize := StrToInt64Def(Parts[20], 0);
-  S.RssPages := StrToInt64Def(Parts[21], 0);
   Result := True;
 end;
 
+{ The tick unit of /proc/self/stat is USER_HZ, which is 100 on every Linux
+  architecture (the kernel ABI), so no sysconf(_SC_CLK_TCK) call is needed. }
 function ClockTicks: Double;
-var
-  T: Int64;
 begin
-  T := fpSysConf(2);  // _SC_CLK_TCK
-  if T <= 0 then
-    T := 100;
-  Result := T;
+  Result := 100;
+end;
+
+{ A "Key:   1234 kB" line of /proc/self/status, returned in bytes. }
+function ReadStatusBytes(const Key: string; out Bytes: Double): Boolean;
+var
+  L: TStringList;
+  I: Integer;
+  Kb: Int64;
+begin
+  Result := False;
+  L := TStringList.Create;
+  try
+    try
+      L.LoadFromFile('/proc/self/status');
+    except
+      Exit;
+    end;
+    for I := 0 to L.Count - 1 do
+      if Copy(L[I], 1, Length(Key) + 1) = Key + ':' then
+      begin
+        Kb := StrToInt64Def(Trim(StringReplace(Copy(L[I], Length(Key) + 2, MaxInt), 'kB', '', [])), -1);
+        if Kb < 0 then
+          Exit;
+        Bytes := Double(Kb) * 1024;
+        Exit(True);
+      end;
+  finally
+    L.Free;
+  end;
 end;
 
 function ProcCpuSeconds(out V: Double): Boolean;
@@ -281,7 +307,7 @@ var
 begin
   Result := ReadProcStat(S);
   if Result then
-    V := (S.UTime + S.STime) / ClockTicks;
+    V := Double(S.UTime + S.STime) / ClockTicks;
 end;
 
 function ProcStartTime(out V: Double): Boolean;
@@ -310,26 +336,18 @@ begin
   end;
   if BTime = 0 then
     Exit;
-  V := BTime + S.StartTime / ClockTicks;
+  V := Double(BTime) + Double(S.StartTime) / ClockTicks;
   Result := True;
 end;
 
 function ProcResidentBytes(out V: Double): Boolean;
-var
-  S: TProcStat;
 begin
-  Result := ReadProcStat(S);
-  if Result then
-    V := S.RssPages * Double(fpSysConf(30));  // _SC_PAGESIZE
+  Result := ReadStatusBytes('VmRSS', V);
 end;
 
 function ProcVirtualBytes(out V: Double): Boolean;
-var
-  S: TProcStat;
 begin
-  Result := ReadProcStat(S);
-  if Result then
-    V := S.VSize;
+  Result := ReadStatusBytes('VmSize', V);
 end;
 
 function ProcOpenFds(out V: Double): Boolean;

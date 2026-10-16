@@ -7,7 +7,7 @@ interface
 
 uses
   Classes, SysUtils, fpcunit, testregistry, prom_atomic, prom_metrics, prom_registry,
-  prom_exposition, prom_collectors, Math, DateUtils;
+  prom_exposition, prom_collectors, prom_clock, Math, DateUtils;
 
 type
   TTestAtomic = class(TTestCase)
@@ -55,6 +55,8 @@ type
   published
     procedure TestHeapMetrics;
     procedure TestProcessMetrics;
+    procedure TestStartTimePrecision;
+    procedure TestMonotonicClock;
   end;
 
   TTestExposition = class(TTestCase)
@@ -360,6 +362,49 @@ begin
   finally
     R.Free;
   end;
+end;
+
+{ FPC evaluates "Int64 / 1e7" in Single precision; at an epoch time of 1.8e9 that rounds
+  to a multiple of 128 s. Regression test for exactly that. }
+procedure TTestCollectors.TestStartTimePrecision;
+var
+  R: TPromRegistry;
+  Text, Raw: string;
+  P, Q: Integer;
+  V, Now_: Double;
+  FS: TFormatSettings;
+begin
+  FS := DefaultFormatSettings;
+  FS.DecimalSeparator := '.';
+  R := TPromRegistry.Create;
+  try
+    RegisterProcessMetrics(R);
+    Text := R.Collect;
+  finally
+    R.Free;
+  end;
+  P := Pos(#10 + 'process_start_time_seconds ', Text);
+  AssertTrue(Text, P > 0);
+  P := P + Length(#10 + 'process_start_time_seconds ');
+  Q := P;
+  while (Q <= Length(Text)) and (Text[Q] <> #10) do
+    Inc(Q);
+  Raw := Copy(Text, P, Q - P);
+  AssertTrue('parse ' + Raw, TryStrToFloat(Raw, V, FS));
+  Now_ := (LocalTimeToUniversal(Now) - UnixDateDelta) * SecsPerDay;
+  AssertTrue('start time near now: ' + Raw, (V <= Now_ + 5) and (V > Now_ - 86400));
+  AssertFalse('start time must not be Single-rounded: ' + Raw,
+    (Frac(V) = 0) and (Trunc(V) mod 128 = 0));
+end;
+
+procedure TTestCollectors.TestMonotonicClock;
+var
+  A, B: Double;
+begin
+  A := PromMonotonicSeconds;
+  Sleep(30);
+  B := PromMonotonicSeconds;
+  AssertTrue('30 ms sleep measured as ' + FloatToStr(B - A), (B - A >= 0.025) and (B - A < 5));
 end;
 
 procedure TTestCollectors.TestHeapMetrics;

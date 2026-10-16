@@ -28,7 +28,7 @@ begin
   if (Frequency <> 0) and QueryPerformanceCounter(Counter) then
     Result := Counter / Frequency
   else
-    Result := GetTickCount64 / 1000;
+    Result := Double(GetTickCount64) / 1000;
 end;
 
 initialization
@@ -41,13 +41,17 @@ var
   TS: timespec;
 begin
   if clock_gettime(CLOCK_MONOTONIC, @TS) = 0 then
-    Result := TS.tv_sec + TS.tv_nsec / 1e9
+  begin
+    // Double() casts: "Int64 + Int64 / 1e9" is evaluated in Single precision by FPC
+    Result := Double(TS.tv_sec);
+    Result := Result + Double(TS.tv_nsec) / 1e9;
+  end
   else
-    Result := GetTickCount64 / 1000;
+    Result := Double(GetTickCount64) / 1000;
 end;
 {$ELSE}
 begin
-  Result := GetTickCount64 / 1000;
+  Result := Double(GetTickCount64) / 1000;
 end;
 {$ENDIF}
 {$ENDIF}
