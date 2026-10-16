@@ -4,6 +4,7 @@ Prometheus client for Free Pascal / Lazarus with lock-free, thread-safe metrics.
 Runtime-only package, FCL only (no LCL), so it works in console apps and services.
 
 ## Layout
+- `docs/GETTING_STARTED.md` - 10-minute tutorial: expose metrics, scrape them with Prometheus, query them (`examples/hello_metrics.lpr`)
 - `docs/adr/` - architecture decision records
 - `prometheus_fpc.lpk` - the package
 - `src/prom_atomic` - CAS-based atomic Int64/Double
