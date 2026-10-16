@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="5">
+    <Name Value="prometheus_fpc_mormot"/>
+    <Type Value="RunTimeOnly"/>
+    <Author Value="Sergei Pechenko"/>
+    <CompilerOptions>
+      <Version Value="11"/>
+      <SearchPaths>
+        <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
+      </SearchPaths>
+    </CompilerOptions>
+    <Description Value="mORMot 2 integration for prometheus_fpc: publish TSynMonitor statistics as metrics and mount /metrics on a mORMot HTTP server. prom_mormot_mm.pas (x86_64 memory manager metrics) is in the package directory but not compiled with it; use it only in programs built on mormot.core.fpcx64mm."/>
+    <License Value="BSD-3-Clause"/>
+    <Version Minor="4"/>
+    <Files>
+      <Item>
+        <Filename Value="prom_mormot.pas"/>
+        <UnitName Value="prom_mormot"/>
+      </Item>
+      <Item>
+        <Filename Value="prom_mormot_http.pas"/>
+        <UnitName Value="prom_mormot_http"/>
+      </Item>
+    </Files>
+    <RequiredPkgs>
+      <Item>
+        <PackageName Value="prometheus_fpc"/>
+      </Item>
+      <Item>
+        <PackageName Value="mormot2"/>
+      </Item>
+    </RequiredPkgs>
+    <UsageOptions>
+      <UnitPath Value="$(PkgOutDir);$(PkgDir)"/>
+    </UsageOptions>
+    <PublishOptions>
+      <Version Value="2"/>
+    </PublishOptions>
+  </Package>
+</CONFIG>
